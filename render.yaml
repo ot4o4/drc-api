@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: drc-api
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: SHOP_PHONE
+        value: "+221 77 000 00 00"
+      # A décommenter avec les clés marchands (voir PAYMENTS.md) :
+      # - key: WAVE_API_TOKEN
+      #   sync: false
+      # - key: WAVE_WEBHOOK_SECRET
+      #   sync: false
+      # - key: ORANGE_CLIENT_ID
+      #   sync: false
+      # - key: ORANGE_CLIENT_SECRET
+      #   sync: false
+      # - key: ORANGE_MERCHANT_KEY
+      #   sync: false
+    disk:
+      name: drc-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
