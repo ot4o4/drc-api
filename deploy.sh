@@ -12,11 +12,21 @@ BK="/root/backups/drc-db-$STAMP.json"
 mkdir -p /root/backups
 
 echo "→ 1/5 sauvegarde des données en production"
-if curl -sf -m 30 -H "X-Admin-Token: $ADM" "$URL/api/admin/backup" -o "$BK"; then
-  python3 -c "import json;d=json.load(open('$BK'));print('   ', d['counts'])"
-else
-  echo "   ⚠️ pas de sauvegarde (service endormi ?) — on continue"
-  rm -f "$BK"
+# réveil du service (le plan free s'endort : le premier appel peut prendre ~50 s)
+curl -s -o /dev/null -m 90 "$URL/api/health" || true
+SAVED=0
+for attempt in 1 2 3; do
+  if curl -sf -m 90 -H "X-Admin-Token: $ADM" "$URL/api/admin/backup" -o "$BK" &&
+     python3 -c "import json,sys;d=json.load(open('$BK'));sys.exit(0 if 'db' in d else 1)"; then
+    python3 -c "import json;d=json.load(open('$BK'));print('   ', d['counts'])"
+    SAVED=1; break
+  fi
+  echo "   tentative $attempt échouée — nouvelle tentative…"
+  sleep 5
+done
+if [ "$SAVED" != "1" ]; then
+  echo "   ⚠️ aucune sauvegarde — déploiement ANNULÉ pour ne pas perdre les données"
+  rm -f "$BK"; exit 1
 fi
 
 echo "→ 2/5 déclenchement du déploiement"
