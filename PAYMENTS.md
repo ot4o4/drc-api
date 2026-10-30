@@ -59,3 +59,27 @@ Le serveur bascule automatiquement sur les **instructions de paiement manuelles*
 
 **Alternative rapide** : un agrégateur (LigdiCash, PayDunya) couvre Wave SN + Orange Money
 avec un seul compte — utile si les dossiers marchands traînent.
+
+---
+
+## Lien de paiement statique (sans contrat API)
+
+Si vous avez un **lien de paiement** Wave Business ou Orange Money (créé depuis l'app
+marchand, sans passer par l'API), collez-le dans les variables d'environnement :
+
+```
+WAVE_PAY_LINK=https://pay.wave.com/m/XXXXXXXX
+ORANGE_PAY_LINK=https://orange-money.example/lien
+```
+
+Le jeton `{ref}` est remplacé par le numéro de commande :
+
+```
+WAVE_PAY_LINK=https://pay.wave.com/m/XXXXXXXX?ref={ref}
+```
+
+Comportement : la commande passe en `awaiting_payment`, l'app affiche un bouton
+**« Ouvrir le paiement sécurisé »** avec ce lien, et la référence est rappelée au client.
+
+> Sans `{ref}`, le lien s'ouvre tel quel : le client doit saisir lui-même le montant et
+> la référence. Avec `{ref}`, la référence est pré-remplie quand le fournisseur l'accepte.

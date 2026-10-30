@@ -24,6 +24,9 @@ const ORANGE_MERCHANT_TOKEN = process.env.ORANGE_MERCHANT_TOKEN || '';
 
 const WAVE_ENABLED = Boolean(WAVE_API_TOKEN);
 const ORANGE_ENABLED = Boolean(ORANGE_MERCHANT_KEY && ORANGE_MERCHANT_TOKEN);
+// Liens de paiement statiques (aucun contrat API requis) : "…/m/abcd?ref={ref}" ou simple URL.
+const WAVE_PAY_LINK = process.env.WAVE_PAY_LINK || '';
+const ORANGE_PAY_LINK = process.env.ORANGE_PAY_LINK || '';
 
 const DELIVERY_FEE = 2000;
 const FREE_DELIVERY_FROM = 15000;
@@ -344,8 +347,20 @@ async function createOrangePayment(order) {
   throw new Error(`orange_error_${res.status}`);
 }
 
-function buildFallbackPayment(method) {
+function buildFallbackPayment(method, orderId = '') {
   const label = method === 'wave' ? 'Wave' : 'Orange Money';
+  const link = method === 'wave' ? WAVE_PAY_LINK : ORANGE_PAY_LINK;
+  // Lien de paiement statique (Wave Business / Orange Money) : utilisable sans contrat API.
+  // Le jeton {ref} est remplacé par la référence de commande si le lien le prévoit.
+  if (link) {
+    return {
+      type: 'link',
+      url: link.replace('{ref}', encodeURIComponent(orderId)).replace('{amount}', ''),
+      number: null,
+      reference: orderId,
+      instructions: `Paiement ${label} sécurisé. Indiquez la référence ${orderId} dans le motif.`
+    };
+  }
   return {
     type: 'instructions',
     url: null,
@@ -534,14 +549,14 @@ async function handleRequest(req, res) {
             instructions: `Cliquez sur le lien ${label} pour payer votre commande en toute sécurité.`
           };
         } else {
-          order.status = 'awaiting_payment_manual';
-          order.payment = {
-            type: 'instructions',
-            url: null,
-            number: SHOP_PHONE,
-            reference: orderId,
-            instructions: paymentInstructionsText(paymentMethod).replace('DRC-XXXX', orderId)
-          };
+          const fallback = buildFallbackPayment(paymentMethod, orderId);
+          order.status = fallback.type === 'link' ? 'awaiting_payment' : 'awaiting_payment_manual';
+          order.payment = fallback;
+          if (fallback.type === 'link') {
+            console.log(`[paiement] ${label} via lien statique pour ${orderId}`);
+          } else {
+            order.payment.instructions = paymentInstructionsText(paymentMethod).replace('DRC-XXXX', orderId);
+          }
         }
       }
 
