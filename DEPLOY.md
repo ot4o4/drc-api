@@ -1,11 +1,29 @@
 # Hébergement de l'API Darou Rahmane Chicken
 
+> **Déploiement actuel (production)**
+> - Dépôt : https://github.com/ot4o4/drc-api (branche `master`)
+> - Service Render : **drc-api** — https://drc-api-dj8t.onrender.com
+> - Tableau de bord : https://dashboard.render.com/web/srv-dbicoc7lk1mc73fu7g2g
+> - Code gérant (`ADMIN_TOKEN`) : à conserver en lieu sûr, il ouvre l'espace gérant
+> - ⚠️ Plan **free** : pas de disque persistant → les commandes sont perdues à chaque
+>   redéploiement. Pour les conserver : passer le service en plan **Starter** et ajouter
+>   un disque de 1 Go monté sur `/opt/render/project/src/data` (aucun changement de code).
+
 L'API n'a **aucune dépendance npm** : un fichier `server.js`, Node 20+, et un dossier `data/`.
-Trois options, de la plus rapide à la plus durable.
 
 ---
 
-## Option A — Railway (sans GitHub, le plus rapide)
+## Redéployer après une modification
+
+```bash
+cd /root/drc-api
+git add -A && git commit -m "…"
+git push origin master          # Render redéploie automatiquement (autoDeploy)
+```
+
+---
+
+## Option A — Railway (sans GitHub, alternative)
 
 Railway accepte un envoi direct du dossier local (pas besoin de dépôt Git).
 
