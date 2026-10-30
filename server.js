@@ -670,6 +670,37 @@ async function handleRequest(req, res) {
       });
     }
 
+    /* 6c. Sauvegarde / restauration (utile quand l'hébergeur n'a pas de disque) */
+    if (method === 'GET' && pathname === '/api/admin/backup') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      return sendJson(res, 200, {
+        version: 1,
+        exported_at: new Date().toISOString(),
+        counts: { products: db.products.length, orders: db.orders.length, users: (db.users || []).length },
+        db
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/restore') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const incoming = body.db || body;
+      if (!incoming || !Array.isArray(incoming.products) || !Array.isArray(incoming.orders)) {
+        return sendJson(res, 400, { error: 'invalid_backup' });
+      }
+      db.products = incoming.products;
+      db.orders = incoming.orders;
+      db.users = Array.isArray(incoming.users) ? incoming.users : [];
+      db.sequences = incoming.sequences && typeof incoming.sequences === 'object' ? incoming.sequences : {};
+      db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};
+      if (typeof incoming.auth_secret === 'string' && incoming.auth_secret) db.auth_secret = incoming.auth_secret;
+      saveDb();
+      return sendJson(res, 200, {
+        ok: true,
+        counts: { products: db.products.length, orders: db.orders.length, users: db.users.length }
+      });
+    }
+
     /* 7. Webhook paiements (stub — voir README) */
     const webhookMatch = pathname.match(/^\/api\/payments\/webhook\/([^/]+)$/);
     if (method === 'POST' && webhookMatch) {
