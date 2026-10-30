@@ -457,7 +457,11 @@ async function handleRequest(req, res) {
       sendJson(res, 200, {
         ok: true,
         shop: SHOP_NAME,
-        payments: { wave: WAVE_ENABLED, orange_money: ORANGE_ENABLED, cod: true }
+        payments: {
+          wave: WAVE_ENABLED || Boolean(WAVE_PAY_LINK),
+          orange_money: ORANGE_ENABLED || Boolean(ORANGE_PAY_LINK),
+          cod: true
+        }
       });
       return;
     }
