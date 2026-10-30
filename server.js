@@ -16,7 +16,10 @@ const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme';
-const SHOP_PHONE = process.env.SHOP_PHONE || '+221 77 000 00 00';
+const SHOP_PHONE = process.env.SHOP_PHONE || '+221 70 917 09 20';
+// Numéros qui reçoivent Wave et Orange Money (séparés par des virgules).
+const PAYMENT_NUMBERS = (process.env.PAYMENT_NUMBERS || '70 917 09 20,78 924 95 55,78 471 17 67')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 const WAVE_API_TOKEN = process.env.WAVE_API_TOKEN || '';
 const WAVE_MERCHANT_NAME = process.env.WAVE_MERCHANT_NAME || '';
 const ORANGE_MERCHANT_KEY = process.env.ORANGE_MERCHANT_KEY || '';
@@ -241,7 +244,7 @@ function nextOrderId() {
 
 function paymentInstructionsText(method) {
   const label = method === 'wave' ? 'Wave' : 'Orange Money';
-  return `Envoyez le montant total au numéro ${label} ci-dessus en indiquant la référence DRC-XXXX dans le motif, puis nous confirmerons votre commande.`;
+  return `Envoyez le montant total à l'un de ces numéros ${label} : ${PAYMENT_NUMBERS.join(' · ')} — indiquez la référence DRC-XXXX dans le motif, puis nous confirmons votre commande.`;
 }
 
 /* Appel HTTP sortant (Wave / Orange Money), sans dépendance. */
@@ -364,9 +367,10 @@ function buildFallbackPayment(method, orderId = '') {
   return {
     type: 'instructions',
     url: null,
-    number: SHOP_PHONE,
+    number: PAYMENT_NUMBERS[0] || SHOP_PHONE,
+    numbers: PAYMENT_NUMBERS,
     reference: '',
-    instructions: `${label} : envoyez le montant total au numéro ci-dessus en indiquant la référence de votre commande dans le motif, puis nous confirmerons votre commande.`
+    instructions: `${label} : envoyez le montant total à l'un de ces numéros (${PAYMENT_NUMBERS.join(' · ')}) en indiquant la référence de votre commande dans le motif, puis nous confirmerons votre commande.`
   };
 }
 
