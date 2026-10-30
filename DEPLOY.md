@@ -18,8 +18,21 @@ L'API n'a **aucune dépendance npm** : un fichier `server.js`, Node 20+, et un d
 ```bash
 cd /root/drc-api
 git add -A && git commit -m "…"
-git push origin master          # Render redéploie automatiquement (autoDeploy)
+git push origin master
+./deploy.sh                     # sauvegarde → déploiement → restauration
 ```
+
+`autoDeploy` est inerte tant que l'application GitHub n'est pas installée sur le compte
+Render : le `push` seul ne déclenche rien, `deploy.sh` appelle l'API de déploiement.
+
+### `deploy.sh` — zéro perte de données sur le plan free
+
+Le script réveille le service, exporte la base (`GET /api/admin/backup`), déclenche le
+déploiement, attend que le build soit `live` sur le bon commit, puis restaure
+(`POST /api/admin/restore`). **Si la sauvegarde échoue, le déploiement est annulé.**
+Les exports sont conservés dans `/root/backups/`.
+
+À lancer depuis `/root/drc-api`, avec `~/.secrets/render_key` et `~/.secrets/admin_token`.
 
 ---
 

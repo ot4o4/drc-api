@@ -167,6 +167,8 @@ et le statut `awaiting_payment_manual`. La commande reste donc toujours valide.
 | PATCH | `/api/admin/orders/:id` | Changer le statut d'une commande (`{"status": "shipping"}`) |
 | GET | `/api/admin/products` | Catalogue complet pour le gérant (stock, disponibilité) |
 | PATCH | `/api/admin/products/:id` | Modifier prix / stock / disponibilité d'un produit |
+| GET | `/api/admin/backup` | Export complet de la base (produits, commandes, comptes) |
+| POST | `/api/admin/restore` | Restaure un export (`backup.db`) — utile sans disque persistant |
 | POST | `/api/payments/webhook/:provider` | Webhook de confirmation de paiement |
 
 Toutes les routes `/api/admin/*` exigent l'en-tête `x-admin-token` (valeur de `ADMIN_TOKEN`)
