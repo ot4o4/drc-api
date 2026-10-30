@@ -31,7 +31,8 @@ Voir `.env.example` pour la liste complète. Résumé :
 |---|---|---|
 | `PORT` | `8080` | Port d'écoute |
 | `ADMIN_TOKEN` | `changeme` | Jeton d'administration (en-tête `x-admin-token`) — **à changer en production** |
-| `SHOP_PHONE` | `+221 77 000 00 00` | Numéro affiché pour les paiements manuels |
+| `SHOP_PHONE` | `+221 70 917 09 20` | Numéro affiché comme contact boutique |
+| `PAYMENT_NUMBERS` | `70 917 09 20,78 924 95 55,78 471 17 67` | Numéros qui reçoivent Wave / Orange Money (séparés par des virgules) |
 | `WAVE_API_TOKEN` | *(vide)* | Jeton Bearer de la Wave Checkout API |
 | `WAVE_MERCHANT_NAME` | *(vide)* | Nom marchand Wave (optionnel) |
 | `ORANGE_MERCHANT_KEY` | *(vide)* | Clé marchande Orange Money Web Payment API |
