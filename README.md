@@ -163,7 +163,18 @@ et le statut `awaiting_payment_manual`. La commande reste donc toujours valide.
 | GET | `/api/orders/:id` | Détail d'une commande (`DRC-YYYY-NNNN`) |
 | GET | `/api/orders?phone=...` | Commandes d'un client par téléphone |
 | GET | `/api/admin/orders` | Toutes les commandes (en-tête `x-admin-token`) |
+| GET | `/api/admin/stats` | Tableau de bord gérant (jour, CA, à traiter, stocks bas) |
+| PATCH | `/api/admin/orders/:id` | Changer le statut d'une commande (`{"status": "shipping"}`) |
+| GET | `/api/admin/products` | Catalogue complet pour le gérant (stock, disponibilité) |
+| PATCH | `/api/admin/products/:id` | Modifier prix / stock / disponibilité d'un produit |
 | POST | `/api/payments/webhook/:provider` | Webhook de confirmation de paiement |
+
+Toutes les routes `/api/admin/*` exigent l'en-tête `x-admin-token` (valeur de `ADMIN_TOKEN`)
+et répondent `401 {"error":"unauthorized"}` sinon.
+
+Statuts acceptés par `PATCH /api/admin/orders/:id` :
+`pending`, `confirmed`, `preparing`, `shipping`, `delivered`, `cancelled`, `paid`.
+Un produit avec `available: false` disparaît du catalogue public `/api/products`.
 
 ### POST /api/orders
 
@@ -233,17 +244,19 @@ dans les champs `reference` ou `metadata.reference` du corps JSON et marque la c
 ## 5. Pointer l'application Android vers ce serveur
 
 L'application (WebView) lit la clé `localStorage` **`drc_api`** pour connaître l'URL de base de l'API.
-Par défaut : `https://api.darourahman.sn`.
 
-Pour changer l'URL de l'API (par exemple pendant les tests) :
+**Depuis l'app, sans rebuild** : *Compte → Espace gérant → « Serveur de l'app »*, collez l'URL
+publique (`https://...`), puis **Enregistrer l'URL du serveur**. L'app se recharge et passe
+en 🟢 En ligne. Le champ est aussi accessible avant connexion, donc une URL erronée se corrige
+toujours depuis l'app.
+
+Équivalent technique (console WebView, tests) :
 
 ```javascript
-// Dans la console WebView ou via un écran de réglages de l'app
 localStorage.setItem('drc_api', 'http://192.168.1.10:8080');
 ```
 
-En production, déclarez l'URL finale dans l'app (`https://api.darourahman.sn`) avant publication
-sur le Play Store. Le serveur accepte les requêtes cross-origin depuis `file://` (CORS `*`).
+Le serveur accepte les requêtes cross-origin depuis `file://` (CORS `*`).
 
 ---
 

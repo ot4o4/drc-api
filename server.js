@@ -445,7 +445,7 @@ async function handleRequest(req, res) {
 
     /* 2. Catalogue */
     if (method === 'GET' && pathname === '/api/products') {
-      sendJson(res, 200, { products: db.products });
+      sendJson(res, 200, { products: db.products.filter((p) => p.available !== false) });
       return;
     }
 
@@ -573,6 +573,86 @@ async function handleRequest(req, res) {
         return sendJson(res, 401, { error: 'unauthorized' });
       }
       return sendJson(res, 200, { orders: db.orders });
+    }
+
+    /* 6b. Administration — statistiques, statuts de commande, produits */
+    const isAdminReq = String(req.headers['x-admin-token'] || '') === ADMIN_TOKEN;
+
+    if (method === 'GET' && pathname === '/api/admin/stats') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const today = new Date().toISOString().slice(0, 10);
+      const todays = db.orders.filter((o) => String(o.created_at || '').slice(0, 10) === today);
+      const revenue = todays
+        .filter((o) => o.status !== 'cancelled')
+        .reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+      const countBy = {};
+      db.orders.forEach((o) => { countBy[o.status || 'pending'] = (countBy[o.status || 'pending'] || 0) + 1; });
+      return sendJson(res, 200, {
+        today_orders: todays.length,
+        today_revenue: revenue,
+        total_orders: db.orders.length,
+        pending: db.orders.filter((o) => ['pending', 'confirmed', 'preparing', 'awaiting_payment_manual', 'awaiting_payment'].includes(o.status || 'pending')).length,
+        shipping: db.orders.filter((o) => o.status === 'shipping').length,
+        by_status: countBy,
+        products: db.products.length,
+        low_stock: db.products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= 5).length
+      });
+    }
+
+    const adminOrderMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)$/);
+    if (adminOrderMatch && (method === 'PATCH' || method === 'POST')) {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const id = decodeURIComponent(adminOrderMatch[1]);
+      const order = db.orders.find((o) => o.id === id);
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const allowed = ['pending', 'confirmed', 'preparing', 'shipping', 'delivered', 'cancelled', 'paid'];
+      if (body.status) {
+        if (!allowed.includes(body.status)) return sendJson(res, 400, { error: 'invalid_status' });
+        order.status = body.status;
+      }
+      if (typeof body.note === 'string') order.admin_note = body.note.slice(0, 500);
+      order.updated_at = new Date().toISOString();
+      if (body.status === 'delivered') order.delivered_at = order.updated_at;
+      saveDb();
+      return sendJson(res, 200, { order });
+    }
+
+    if (method === 'GET' && pathname === '/api/admin/products') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      return sendJson(res, 200, {
+        products: db.products.map((p) => ({
+          id: p.id, name: p.name, cat: p.cat, price: p.price, old: p.old,
+          stock: p.stock, unit: p.unit, available: p.available !== false
+        }))
+      });
+    }
+
+    const adminProductMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)$/);
+    if (adminProductMatch && (method === 'PATCH' || method === 'POST')) {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const id = decodeURIComponent(adminProductMatch[1]);
+      const product = db.products.find((p) => String(p.id) === id);
+      if (!product) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.price !== undefined) {
+        const price = Number(body.price);
+        if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { error: 'invalid_price' });
+        product.price = Math.round(price);
+      }
+      if (body.stock !== undefined) {
+        const stock = Number(body.stock);
+        if (!Number.isFinite(stock) || stock < 0) return sendJson(res, 400, { error: 'invalid_stock' });
+        product.stock = Math.round(stock);
+      }
+      if (body.available !== undefined) product.available = Boolean(body.available);
+      if (typeof body.name === 'string' && body.name.trim()) product.name = body.name.trim().slice(0, 80);
+      product.updated_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, {
+        product: { id: product.id, name: product.name, price: product.price,
+          stock: product.stock, available: product.available !== false }
+      });
     }
 
     /* 7. Webhook paiements (stub — voir README) */
