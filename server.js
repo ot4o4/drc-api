@@ -35,6 +35,11 @@ const DELIVERY_FEE = 2000;
 const FREE_DELIVERY_FROM = 15000;
 const SHOP_NAME = 'Darou Rahman Chicken';
 
+/* Codes promo — le code TERANGA est annoncé dans l'application. */
+const PROMOS = {
+  TERANGA: { percent: 15, min_subtotal: 5000, first_order_only: true, label: '-15% sur votre 1re commande' }
+};
+
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
@@ -385,6 +390,32 @@ function normalizePhone(v) {
   const m = d.match(/^(\+?221)?7\d{8}$/);
   return m ? (d.startsWith('+') ? d : (d.length === 9 ? '+221' + d : '+' + d)) : null;
 }
+/* Clé téléphone réduite aux 9 chiffres locaux (tolère +221 / 00221 / espaces). */
+function phoneKey(v) {
+  const d = String(v || '').replace(/\D/g, '');
+  return d.length >= 9 ? d.slice(-9) : '';
+}
+/* Valide un code promo contre l'historique du numéro et le sous-total. */
+function evaluatePromo(code, phone, subtotal) {
+  const key = String(code || '').trim().toUpperCase();
+  const promo = PROMOS[key];
+  if (!promo) return { ok: false, error: 'unknown_code' };
+  const sub = Number(subtotal) || 0;
+  if (sub < promo.min_subtotal) {
+    return { ok: false, error: 'min_subtotal', min_subtotal: promo.min_subtotal };
+  }
+  if (promo.first_order_only) {
+    const k = phoneKey(phone);
+    const alreadyOrdered = k && db.orders.some(
+      (o) => phoneKey(o.customer && o.customer.phone) === k && o.status !== 'cancelled'
+    );
+    if (alreadyOrdered) return { ok: false, error: 'already_used' };
+  }
+  return {
+    ok: true, code: key, label: promo.label, percent: promo.percent,
+    discount: Math.round((sub * promo.percent) / 100)
+  };
+}
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
   return salt + ':' + crypto.scryptSync(pw, salt, 32).toString('hex');
@@ -418,7 +449,7 @@ function userFromRequest(req) {
     return db.users.find((u) => u.id === data.uid) || null;
   } catch (e) { return null; }
 }
-function publicUser(u) { return { id: u.id, name: u.name, phone: u.phone }; }
+function publicUser(u) { return { id: u.id, name: u.name, phone: u.phone, points: Math.max(0, Number(u.points) || 0) }; }
 function ensureGoogleUser() {
   let u = db.users.find((x) => x.google);
   if (!u) {
@@ -472,6 +503,13 @@ async function handleRequest(req, res) {
       return;
     }
 
+    /* 2b. Validation d'un code promo (sans création de commande) */
+    if (method === 'POST' && pathname === '/api/promo/validate') {
+      const body = parseJsonBody(await readBody(req)) || {};
+      const verdict = evaluatePromo(body.code, body.phone, body.subtotal);
+      return sendJson(res, verdict.ok ? 200 : 400, verdict);
+    }
+
     /* 3. Création de commande */
     if (method === 'POST' && pathname === '/api/orders') {
       const body = parseJsonBody(await readBody(req));
@@ -491,17 +529,40 @@ async function handleRequest(req, res) {
         return sendJson(res, 400, { error: 'invalid' });
       }
 
-      const cleanItems = items.map((it) => ({
-        id: Number(it.id) || 0,
-        name: String(it.name || ''),
-        price: Number(it.price) || 0,
-        qty: Math.max(1, Number(it.qty) || 1),
-        variant: String(it.variant || '')
-      }));
-
+      // Les prix sont re-résolus depuis la base : un client ne peut pas les falsifier.
+      const resolvedItems = [];
+      for (const it of items) {
+        const idNum = Number(it && it.id) || 0;
+        const product = db.products.find((p) => Number(p.id) === idNum);
+        if (!product || product.available === false) {
+          return sendJson(res, 400, { error: 'invalid_item', id: idNum });
+        }
+        resolvedItems.push({
+          id: product.id,
+          name: product.name || String(it.name || ''),
+          price: Number(product.price) || 0,
+          qty: Math.max(1, Math.min(50, Number(it.qty) || 1)),
+          variant: String(it.variant || '').slice(0, 60)
+        });
+      }
+      const cleanItems = resolvedItems;
       const subtotal = cleanItems.reduce((sum, it) => sum + it.price * it.qty, 0);
       const deliveryFee = subtotal < FREE_DELIVERY_FROM ? DELIVERY_FEE : 0;
-      const total = subtotal + deliveryFee;
+
+      let discount = 0;
+      let promo = null;
+      if (body.promo) {
+        const verdict = evaluatePromo(body.promo, customer.phone, subtotal);
+        if (!verdict.ok) {
+          return sendJson(res, 400, {
+            error: 'invalid_promo', reason: verdict.error,
+            ...(verdict.min_subtotal ? { min_subtotal: verdict.min_subtotal } : {})
+          });
+        }
+        discount = verdict.discount;
+        promo = { code: verdict.code, label: verdict.label, percent: verdict.percent };
+      }
+      const total = Math.max(0, subtotal - discount) + deliveryFee;
 
       const orderId = nextOrderId();
       const order = {
@@ -517,6 +578,8 @@ async function handleRequest(req, res) {
         },
         payment_method: paymentMethod,
         subtotal,
+        discount,
+        promo,
         delivery_fee: deliveryFee,
         total,
         payment: null
@@ -569,6 +632,10 @@ async function handleRequest(req, res) {
       }
 
       db.orders.push(order);
+      // Fidélité : 1 point par 100 F payés, crédité au compte du même numéro.
+      const buyer = db.users.find((u) => normalizePhone(u.phone) === normalizePhone(customer.phone));
+      order.points_earned = Math.floor(total / 100);
+      if (buyer) buyer.points = (Number(buyer.points) || 0) + order.points_earned;
       saveDb();
       return sendJson(res, 201, { order });
     }
