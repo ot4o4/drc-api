@@ -722,6 +722,7 @@ async function handleRequest(req, res) {
           cod: true
         },
         auth: { google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) },
+        notify: { telegram: Boolean(TELEGRAM_TOKEN && TELEGRAM_CHAT), webhook: Boolean(ORDER_WEBHOOK) },
         version: '7.7'
       });
       return;
