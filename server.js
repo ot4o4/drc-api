@@ -56,9 +56,9 @@ const SEED_PRODUCTS = [
     name: 'Poulet Entier',
     cat: 'entier',
     img: 'p1.jpg',
-    price: 7500,
-    old: 9000,
-    unit: 'la pièce (~1,8 kg)',
+    price: 4500,
+    old: 0,
+    unit: 'la pièce (~1,7 kg)',
     rating: 4.9,
     sold: 1240,
     stock: 38,
@@ -71,8 +71,8 @@ const SEED_PRODUCTS = [
     name: 'Blanc de Poulet (Filet)',
     cat: 'blancs',
     img: 'p2.jpg',
-    price: 6500,
-    old: 7500,
+    price: 5000,
+    old: 0,
     unit: 'le kg',
     rating: 4.8,
     sold: 986,
@@ -87,7 +87,7 @@ const SEED_PRODUCTS = [
     cat: 'cuisses',
     img: 'p3.jpg',
     price: 4900,
-    old: 5900,
+    old: 0,
     unit: 'le kg',
     rating: 4.8,
     sold: 2150,
@@ -102,7 +102,7 @@ const SEED_PRODUCTS = [
     cat: 'ailes',
     img: 'p4.jpg',
     price: 3900,
-    old: 4500,
+    old: 0,
     unit: 'le kg',
     rating: 4.7,
     sold: 743,
@@ -117,7 +117,7 @@ const SEED_PRODUCTS = [
     cat: 'abats',
     img: 'p5.jpg',
     price: 3200,
-    old: 3800,
+    old: 0,
     unit: 'le kg',
     rating: 4.6,
     sold: 412,
@@ -132,7 +132,7 @@ const SEED_PRODUCTS = [
     cat: 'braise',
     img: 'p6.jpg',
     price: 8900,
-    old: 10500,
+    old: 0,
     unit: 'le plat (~2 kg)',
     rating: 5.0,
     sold: 1876,
@@ -147,7 +147,7 @@ const SEED_PRODUCTS = [
     cat: 'blancs',
     img: 'p7.jpg',
     price: 6900,
-    old: 7900,
+    old: 0,
     unit: 'le kg',
     rating: 4.7,
     sold: 528,
@@ -162,7 +162,7 @@ const SEED_PRODUCTS = [
     cat: 'oeufs',
     img: 'p8.jpg',
     price: 5500,
-    old: 6000,
+    old: 0,
     unit: 'le plateau',
     rating: 4.9,
     sold: 3210,
@@ -345,6 +345,9 @@ function publicOrder(o) {
     delivery_fee: o.delivery_fee,
     total: o.total,
     payment: o.payment,
+    payment_status: o.payment_status || (o.status === 'paid' ? 'paid' : 'unpaid'),
+    paid_at: o.paid_at || null,
+    payment_refusal_reason: o.payment_refusal_reason || null,
     points_earned: o.points_earned,
     customer: { zone: c.zone || '', phone_masked: maskPhone(c.phone) }
   };
@@ -739,7 +742,8 @@ async function handleRequest(req, res) {
         promo,
         delivery_fee: deliveryFee,
         total,
-        payment: null
+        payment: null,
+        payment_status: paymentMethod === 'cod' ? 'cod_pending' : 'awaiting'
       };
 
       if (paymentMethod === 'cod') {
@@ -867,6 +871,7 @@ async function handleRequest(req, res) {
         pending: db.orders.filter((o) => ['pending', 'confirmed', 'preparing', 'awaiting_payment_manual', 'awaiting_payment'].includes(o.status || 'pending')).length,
         shipping: db.orders.filter((o) => o.status === 'shipping').length,
         by_status: countBy,
+        payments_to_review: db.orders.filter((o) => o.payment_status === 'awaiting' || ['awaiting_payment', 'awaiting_payment_manual'].includes(o.status || '')).length,
         products: db.products.length,
         users: db.users.length,
         low_stock: db.products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= 5).length
@@ -884,10 +889,48 @@ async function handleRequest(req, res) {
       if (body.status) {
         if (!allowed.includes(body.status)) return sendJson(res, 400, { error: 'invalid_status' });
         order.status = body.status;
+        if (body.status === 'paid') {
+          order.payment_status = 'paid';
+          order.paid_at = order.paid_at || new Date().toISOString();
+        }
       }
       if (typeof body.note === 'string') order.admin_note = body.note.slice(0, 500);
       order.updated_at = new Date().toISOString();
       if (body.status === 'delivered') order.delivered_at = order.updated_at;
+      saveDb();
+      return sendJson(res, 200, { order });
+    }
+
+    /* 6c. Encaissement — le gérant confirme ou refuse un paiement */
+    const adminPaymentMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)\/payment$/);
+    if (adminPaymentMatch && method === 'POST') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const id = decodeURIComponent(adminPaymentMatch[1]);
+      const order = db.orders.find((o) => o.id === id);
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.action !== 'confirm' && body.action !== 'refuse') {
+        return sendJson(res, 400, { error: 'invalid_action' });
+      }
+      const alreadyPaid = order.payment_status === 'paid' || order.status === 'paid';
+      if (alreadyPaid) return sendJson(res, 409, { error: 'already_paid', order });
+      const now = new Date().toISOString();
+      if (body.action === 'confirm') {
+        order.payment_status = 'paid';
+        order.paid_at = now;
+        if (['pending', 'awaiting_payment', 'awaiting_payment_manual'].includes(order.status || 'pending')) {
+          order.status = 'confirmed';
+        }
+        order.payment_review = { action: 'confirm', at: now, by: 'gerant' };
+      } else {
+        const reason = String(body.reason || '').trim().slice(0, 300) || 'Paiement non reçu';
+        order.payment_status = 'refused';
+        order.refused_at = now;
+        order.payment_refusal_reason = reason;
+        order.status = 'cancelled';
+        order.payment_review = { action: 'refuse', at: now, reason, by: 'gerant' };
+      }
+      order.updated_at = now;
       saveDb();
       return sendJson(res, 200, { order });
     }
@@ -1078,6 +1121,7 @@ async function handleRequest(req, res) {
         const order = db.orders.find((o) => o.id === reference || (o.payment && o.payment.reference === reference));
         if (order) {
           order.status = 'paid';
+          order.payment_status = 'paid';
           order.paid_at = new Date().toISOString();
           saveDb();
         }
