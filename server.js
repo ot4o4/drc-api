@@ -38,6 +38,11 @@ const ORANGE_PAY_LINK = process.env.ORANGE_PAY_LINK || '';
 
 const DELIVERY_FEE = 2000;
 const FREE_DELIVERY_FROM = 15000;
+
+/* Push de la commande au gérant (facultatif : sans variables, rien n'est envoyé). */
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT_ID || '';
+const ORDER_WEBHOOK = process.env.ORDER_WEBHOOK_URL || '';
 const SHOP_NAME = 'Darou Rahman Chicken';
 
 /* Codes promo — le code TERANGA est annoncé dans l'application. */
@@ -357,6 +362,47 @@ function publicOrder(o) {
 }
 
 /* Coordonnées de livraison : point choisi sur la carte (Dakar & banlieue). */
+function orderSummary(o) {
+  const c = o.customer || {};
+  const items = (o.items || []).map((i) => '• ' + i.qty + '× ' + i.name +
+    (i.variant ? ' (' + i.variant + ')' : '') + ' — ' + ((i.price || 0) * (i.qty || 1)) + ' F').join('\n');
+  const pay = o.payment_method === 'cod' ? 'Espèces à la livraison'
+    : o.payment_method === 'wave' ? 'Wave' : 'Orange Money';
+  return [
+    '🛒 Nouvelle commande ' + o.id,
+    '👤 ' + (c.name || '—') + ' · ' + (c.phone || '—'),
+    c.email ? '✉️ ' + c.email : '',
+    '📍 ' + (c.address || c.zone || '—'),
+    (c.lat && c.lng) ? '🗺️ https://www.google.com/maps?q=' + c.lat + ',' + c.lng : '',
+    c.slot ? '🕒 ' + c.slot : '',
+    '💳 ' + pay,
+    c.pay_phone ? '📱 ' + c.pay_phone : '',
+    '',
+    items,
+    '',
+    'Total : ' + o.total + ' F' + (o.discount ? ' (remise ' + o.discount + ' F)' : '')
+  ].filter(Boolean).join('\n');
+}
+
+async function notifyManager(o) {
+  try {
+    if (ORDER_WEBHOOK) {
+      await fetch(ORDER_WEBHOOK, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: orderSummary(o), order: o })
+      });
+    }
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT) {
+      await fetch('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT, text: orderSummary(o), disable_web_page_preview: true })
+      });
+    }
+  } catch (e) {
+    console.error('[notif] échec envoi gérant :', e.message);
+  }
+}
+
 function buildCustomer(c) {
   const lat = Number(c.lat), lng = Number(c.lng);
   const hasGeo = Number.isFinite(lat) && Number.isFinite(lng) &&
@@ -822,6 +868,7 @@ async function handleRequest(req, res) {
       order.points_earned = Math.floor(total / 100);
       if (buyer) buyer.points = (Number(buyer.points) || 0) + order.points_earned;
       saveDb();
+      notifyManager(order);
       return sendJson(res, 201, { order });
     }
 
