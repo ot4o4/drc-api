@@ -366,6 +366,9 @@ function buildCustomer(c) {
     phone: String(c.phone || '').trim().slice(0, 20),
     zone: String(c.zone || '').slice(0, 60),
     note: String(c.note || '').slice(0, 500),
+    slot: String(c.slot || '').slice(0, 60),
+    pay_phone: String(c.pay_phone || '').slice(0, 20),
+    email: String(c.email || '').slice(0, 80),
     address: String(c.address || '').slice(0, 180),
     lat: hasGeo ? Number(lat.toFixed(6)) : null,
     lng: hasGeo ? Number(lng.toFixed(6)) : null
