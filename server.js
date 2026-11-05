@@ -92,7 +92,7 @@ const SEED_PRODUCTS = [
     rating: 4.8,
     sold: 2150,
     stock: 64,
-    tags: [['green', 'Frais du jour'], ['red', '-17%']],
+    tags: [['green', 'Frais du jour']],
     variants: ['Mélange cuisses/pilons', 'Cuisses seules', 'Pilons seuls'],
     desc: "<p>Le morceau préféré des familles sénégalaises, tendre et savoureux.</p><ul><li>Élevage local sélectionné avec nos partenaires fermiers</li><li>Découpe du jour pour une fraîcheur garantie</li><li>Chaîne du froid maintenue de l'abattoir à votre cuisine</li><li>Parfait pour le yassa, le thiéboudienne ou le braisé</li></ul>"
   },
