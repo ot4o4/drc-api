@@ -619,9 +619,16 @@ function sanitizeAddress(body) {
   const details = String(body.details || '').trim().slice(0, 160);
   const label = String(body.label || '').trim().slice(0, 30) || 'Adresse';
   const rawPhone = body.phone ? normalizePhone(body.phone) : '';
+  const lat = Number(body.lat), lng = Number(body.lng);
+  const hasGeo = Number.isFinite(lat) && Number.isFinite(lng) &&
+    lat >= 12 && lat <= 17 && lng >= -18 && lng <= -11;
   if (!zone) return { error: 'zone_required' };
   if (body.phone && !rawPhone) return { error: 'invalid_phone' };
-  return { value: { label, zone, details, phone: rawPhone || '', is_default: Boolean(body.is_default) } };
+  return { value: {
+    label, zone, details, phone: rawPhone || '', is_default: Boolean(body.is_default),
+    lat: hasGeo ? Number(lat.toFixed(6)) : null,
+    lng: hasGeo ? Number(lng.toFixed(6)) : null
+  } };
 }
 
 function setDefaultAddress(user, addressId) {
@@ -1279,6 +1286,11 @@ async function handleRequest(req, res) {
         address.zone = zone;
       }
       if (body.details !== undefined) address.details = String(body.details || '').trim().slice(0, 160);
+      if (body.lat !== undefined && body.lng !== undefined) {
+        const lat = Number(body.lat), lng = Number(body.lng);
+        const ok = Number.isFinite(lat) && Number.isFinite(lng) && lat >= 12 && lat <= 17 && lng >= -18 && lng <= -11;
+        if (ok) { address.lat = Number(lat.toFixed(6)); address.lng = Number(lng.toFixed(6)); }
+      }
       if (body.phone !== undefined) {
         const phone = body.phone ? normalizePhone(body.phone) : '';
         if (body.phone && !phone) return sendJson(res, 400, { error: 'invalid_phone' });
