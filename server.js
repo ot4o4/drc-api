@@ -16,6 +16,11 @@ const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme';
+const IS_HOSTED = Boolean(process.env.RENDER || process.env.NODE_ENV === 'production');
+if (IS_HOSTED && (!process.env.ADMIN_TOKEN || ADMIN_TOKEN === 'changeme')) {
+  console.error('[sécurité] ADMIN_TOKEN manquant ou par défaut — démarrage refusé.');
+  process.exit(1);
+}
 const SHOP_PHONE = process.env.SHOP_PHONE || '+221 70 917 09 20';
 // Numéros qui reçoivent Wave et Orange Money (séparés par des virgules).
 const PAYMENT_NUMBERS = (process.env.PAYMENT_NUMBERS || '70 917 09 20,78 924 95 55,78 471 17 67')
@@ -205,6 +210,13 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, x-admin-token',
@@ -219,7 +231,7 @@ function readBody(req) {
     let size = 0;
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > 1024 * 1024) {
+      if (size > 256 * 1024) {
         reject(new Error('payload_too_large'));
         req.destroy();
         return;
@@ -237,6 +249,96 @@ function parseJsonBody(text) {
   } catch {
     return null;
   }
+}
+
+/* ------------------------- Sécurité (limites & comparaisons) ------------------------- */
+
+/* Comparaison à temps constant, tolérante aux longueurs différentes. */
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a == null ? '' : a));
+  const bb = Buffer.from(String(b == null ? '' : b));
+  if (ba.length !== bb.length) {
+    crypto.timingSafeEqual(ba, ba);
+    return false;
+  }
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+function clientIp(req) {
+  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xf || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+/* Fenêtre glissante en mémoire (instance unique sur Render free). */
+const RATE_BUCKETS = new Map();
+function rateLimit(req, name, limit, windowMs) {
+  const key = name + ':' + clientIp(req);
+  const now = Date.now();
+  let arr = RATE_BUCKETS.get(key);
+  if (!arr) { arr = []; RATE_BUCKETS.set(key, arr); }
+  while (arr.length && now - arr[0] >= windowMs) arr.shift();
+  if (arr.length >= limit) {
+    return { ok: false, retry: Math.max(1, Math.ceil((windowMs - (now - arr[0])) / 1000)) };
+  }
+  arr.push(now);
+  return { ok: true };
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of RATE_BUCKETS) {
+    while (v.length && now - v[0] > 3600e3) v.shift();
+    if (!v.length) RATE_BUCKETS.delete(k);
+  }
+}, 600e3).unref();
+
+/* Échecs d'authentification gérant : 8 essais ratés → 30 min de blocage. */
+const ADMIN_FAILS = new Map();
+const ADMIN_FAIL_LIMIT = 8;
+const ADMIN_BLOCK_MS = 30 * 60 * 1000;
+function adminBlocked(req) {
+  const rec = ADMIN_FAILS.get(clientIp(req));
+  return Boolean(rec && rec.blockedUntil && rec.blockedUntil > Date.now());
+}
+function adminFailed(req) {
+  const ip = clientIp(req);
+  const rec = ADMIN_FAILS.get(ip) || { count: 0, blockedUntil: 0 };
+  rec.count += 1;
+  if (rec.count >= ADMIN_FAIL_LIMIT) { rec.blockedUntil = Date.now() + ADMIN_BLOCK_MS; rec.count = 0; }
+  ADMIN_FAILS.set(ip, rec);
+}
+function isAdmin(req) {
+  if (!ADMIN_TOKEN || ADMIN_TOKEN === 'changeme') return false;
+  if (adminBlocked(req)) return false;
+  const given = String(req.headers['x-admin-token'] || '');
+  const ok = safeEqual(given, ADMIN_TOKEN);
+  if (!ok && given) adminFailed(req);
+  return ok;
+}
+
+function maskPhone(p) {
+  const s = String(p == null ? '' : p);
+  if (s.length < 6) return '•••';
+  return s.slice(0, 4) + '•••' + s.slice(-2);
+}
+
+/* Commande sans données personnelles : utilisée pour tout accès non authentifié. */
+function publicOrder(o) {
+  if (!o) return null;
+  const c = o.customer || {};
+  return {
+    id: o.id,
+    status: o.status,
+    created_at: o.created_at,
+    items: o.items,
+    subtotal: o.subtotal,
+    discount: o.discount,
+    promo: o.promo,
+    delivery_fee: o.delivery_fee,
+    total: o.total,
+    payment: o.payment,
+    points_earned: o.points_earned,
+    customer: { zone: c.zone || '', phone_masked: maskPhone(c.phone) }
+  };
 }
 
 function nextOrderId() {
@@ -450,18 +552,6 @@ function userFromRequest(req) {
   } catch (e) { return null; }
 }
 function publicUser(u) { return { id: u.id, name: u.name, phone: u.phone, points: Math.max(0, Number(u.points) || 0) }; }
-function ensureGoogleUser() {
-  let u = db.users.find((x) => x.google);
-  if (!u) {
-    u = {
-      id: 'g' + Date.now().toString(36), name: 'Client Google', phone: '+221700000000',
-      pass_hash: hashPassword(crypto.randomBytes(12).toString('hex')),
-      google: true, created_at: new Date().toISOString()
-    };
-    db.users.push(u); saveDb();
-  }
-  return u;
-}
 
 /* -------------------------------- Routes --------------------------------- */
 
@@ -483,6 +573,13 @@ async function handleRequest(req, res) {
   }
 
   try {
+    /* 0. Limite globale anti-abus : 300 requêtes / minute / IP */
+    const rl = rateLimit(req, 'all', 300, 60e3);
+    if (!rl.ok) {
+      res.setHeader('Retry-After', String(rl.retry));
+      return sendJson(res, 429, { error: 'rate_limited', retry_after: rl.retry });
+    }
+
     /* 1. Santé */
     if (method === 'GET' && pathname === '/api/health') {
       sendJson(res, 200, {
@@ -492,7 +589,9 @@ async function handleRequest(req, res) {
           wave: WAVE_ENABLED || Boolean(WAVE_PAY_LINK),
           orange_money: ORANGE_ENABLED || Boolean(ORANGE_PAY_LINK),
           cod: true
-        }
+        },
+        auth: { google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) },
+        version: '7.7'
       });
       return;
     }
@@ -512,6 +611,11 @@ async function handleRequest(req, res) {
 
     /* 3. Création de commande */
     if (method === 'POST' && pathname === '/api/orders') {
+      const rlCreate = rateLimit(req, 'order_create', 15, 60e3);
+      if (!rlCreate.ok) {
+        res.setHeader('Retry-After', String(rlCreate.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlCreate.retry });
+      }
       const body = parseJsonBody(await readBody(req));
       if (!body) return sendJson(res, 400, { error: 'invalid' });
 
@@ -571,10 +675,10 @@ async function handleRequest(req, res) {
         created_at: new Date().toISOString(),
         items: cleanItems,
         customer: {
-          name: customer.name.trim(),
-          phone: customer.phone.trim(),
-          zone: String(customer.zone || ''),
-          note: String(customer.note || '')
+          name: customer.name.trim().slice(0, 60),
+          phone: customer.phone.trim().slice(0, 20),
+          zone: String(customer.zone || '').slice(0, 60),
+          note: String(customer.note || '').slice(0, 500)
         },
         payment_method: paymentMethod,
         subtotal,
@@ -642,31 +746,57 @@ async function handleRequest(req, res) {
 
     /* 5. Commandes par téléphone (doit être testé avant /api/orders/:id) */
     if (method === 'GET' && pathname === '/api/orders' && url.searchParams.has('phone')) {
-      const phone = url.searchParams.get('phone').trim();
-      const orders = db.orders.filter((o) => o.customer && o.customer.phone === phone);
+      const rlPhone = rateLimit(req, 'orders_phone', 60, 60e3);
+      if (!rlPhone.ok) {
+        res.setHeader('Retry-After', String(rlPhone.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlPhone.retry });
+      }
+      const asked = normalizePhone(url.searchParams.get('phone')) || String(url.searchParams.get('phone') || '').trim();
+      const key = phoneKey(asked);
+      const orders = db.orders
+        .filter((o) => key && phoneKey(o.customer && o.customer.phone) === key)
+        .map(publicOrder);
+      return sendJson(res, 200, { orders });
+    }
+
+    /* 3b. Commandes du client connecté (sans exposer le numéro en clair) */
+    if (method === 'GET' && pathname === '/api/orders' && !url.searchParams.has('phone')) {
+      const user = userFromRequest(req);
+      if (!user) return sendJson(res, 401, { error: 'unauthorized' });
+      const key = phoneKey(user.phone);
+      const orders = db.orders.filter((o) => phoneKey(o.customer && o.customer.phone) === key);
       return sendJson(res, 200, { orders });
     }
 
     /* 4. Détail d'une commande */
     const orderMatch = pathname.match(/^\/api\/orders\/([^/]+)$/);
     if (method === 'GET' && orderMatch) {
+      const rlOrder = rateLimit(req, 'order_detail', 90, 60e3);
+      if (!rlOrder.ok) {
+        res.setHeader('Retry-After', String(rlOrder.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlOrder.retry });
+      }
       const id = decodeURIComponent(orderMatch[1]);
       const order = db.orders.find((o) => o.id === id);
       if (!order) return sendJson(res, 404, { error: 'not_found' });
-      return sendJson(res, 200, { order });
+      const user = userFromRequest(req);
+      const owner = Boolean(user && phoneKey(user.phone) === phoneKey(order.customer && order.customer.phone));
+      return sendJson(res, 200, { order: (owner || isAdmin(req)) ? order : publicOrder(order) });
     }
 
     /* 6. Administration */
     if (method === 'GET' && pathname === '/api/admin/orders') {
-      const token = req.headers['x-admin-token'];
-      if (!token || token !== ADMIN_TOKEN) {
-        return sendJson(res, 401, { error: 'unauthorized' });
+      const rlAdmin = rateLimit(req, 'admin', 120, 10 * 60e3);
+      if (!rlAdmin.ok) {
+        res.setHeader('Retry-After', String(rlAdmin.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlAdmin.retry });
       }
+      if (!isAdmin(req)) return sendJson(res, 401, { error: 'unauthorized' });
       return sendJson(res, 200, { orders: db.orders });
     }
 
     /* 6b. Administration — statistiques, statuts de commande, produits */
-    const isAdminReq = String(req.headers['x-admin-token'] || '') === ADMIN_TOKEN;
+    const isAdminReq = isAdmin(req);
 
     if (method === 'GET' && pathname === '/api/admin/stats') {
       if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
@@ -780,13 +910,23 @@ async function handleRequest(req, res) {
     const webhookMatch = pathname.match(/^\/api\/payments\/webhook\/([^/]+)$/);
     if (method === 'POST' && webhookMatch) {
       const bodyText = await readBody(req);
+      const provider = webhookMatch[1];
       const waveSecret = process.env.WAVE_WEBHOOK_SECRET || '';
-      if (webhookMatch[1] === 'wave' && waveSecret) {
+      const orangeSecret = process.env.ORANGE_WEBHOOK_SECRET || '';
+      const configured = provider === 'wave' ? Boolean(waveSecret) : provider === 'orange_money' ? Boolean(orangeSecret) : false;
+      if (!configured) {
+        /* Aucun secret : on refuse tout webhook plutôt que de marquer une commande payée sur parole. */
+        return sendJson(res, 503, { error: 'webhook_not_configured' });
+      }
+      if (provider === 'wave') {
         const sig = String(req.headers['wave-signature'] || '');
         const m = sig.match(/t=(\d+),v1=([a-f0-9]+)/i);
-        const ok = m && Math.abs(Date.now() / 1000 - Number(m[1])) < 300 &&
-          crypto.createHmac('sha256', waveSecret).update(m[1] + '.' + bodyText).digest('hex') === m[2];
+        const expected = m ? crypto.createHmac('sha256', waveSecret).update(m[1] + '.' + bodyText).digest('hex') : '';
+        const ok = Boolean(m) && Math.abs(Date.now() / 1000 - Number(m[1])) < 300 && safeEqual(expected, m[2]);
         if (!ok) return sendJson(res, 401, { error: 'bad_signature' });
+      } else {
+        const given = String(req.headers['x-orange-secret'] || '');
+        if (!safeEqual(given, orangeSecret)) return sendJson(res, 401, { error: 'bad_signature' });
       }
       const body = parseJsonBody(bodyText);
       let reference = null;
@@ -807,20 +947,43 @@ async function handleRequest(req, res) {
 
     /* 8. Authentification */
     if (pathname === '/api/auth/register' && method === 'POST') {
+      const rlReg = rateLimit(req, 'register', 6, 10 * 60e3);
+      if (!rlReg.ok) {
+        res.setHeader('Retry-After', String(rlReg.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlReg.retry });
+      }
       const body = parseJsonBody(await readBody(req)) || {};
-      const name = String(body.name || '').trim();
+      const name = String(body.name || '').trim().slice(0, 60);
       const phone = normalizePhone(body.phone);
       const password = String(body.password || '');
-      if (name.length < 3 || !phone || password.length < 6) return sendJson(res, 400, { error: 'invalid' });
+      if (name.length < 3 || !phone || password.length < 6 || password.length > 128) return sendJson(res, 400, { error: 'invalid' });
       if (db.users.some((u) => u.phone === phone)) return sendJson(res, 409, { error: 'phone_exists' });
-      const user = { id: 'u' + Date.now().toString(36) + Math.floor(Math.random() * 999), name, phone, pass_hash: hashPassword(password), created_at: new Date().toISOString() };
+      // Les commandes passées avant l'inscription rapportent aussi leurs points.
+      const key = phoneKey(phone);
+      const pastOrders = db.orders.filter(
+        (o) => phoneKey(o.customer && o.customer.phone) === key && o.status !== 'cancelled'
+      );
+      const seedPoints = pastOrders.reduce((sum, o) => sum + Math.floor((Number(o.total) || 0) / 100), 0);
+      const user = { id: 'u' + Date.now().toString(36) + Math.floor(Math.random() * 999), name, phone, pass_hash: hashPassword(password), points: seedPoints, created_at: new Date().toISOString() };
       db.users.push(user); saveDb();
       return sendJson(res, 201, { token: makeToken(user), user: publicUser(user) });
     }
     if (pathname === '/api/auth/login' && method === 'POST') {
+      const rlLogin = rateLimit(req, 'login', 10, 10 * 60e3);
+      if (!rlLogin.ok) {
+        res.setHeader('Retry-After', String(rlLogin.retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: rlLogin.retry });
+      }
       const body = parseJsonBody(await readBody(req)) || {};
       const phone = normalizePhone(body.phone);
       const password = String(body.password || '');
+      if (phone) {
+        const rlPhone = rateLimit(req, 'login_phone_' + phone, 6, 10 * 60e3);
+        if (!rlPhone.ok) {
+          res.setHeader('Retry-After', String(rlPhone.retry));
+          return sendJson(res, 429, { error: 'rate_limited', retry_after: rlPhone.retry });
+        }
+      }
       const user = phone ? db.users.find((u) => u.phone === phone) : null;
       if (!user || !verifyPassword(password, user.pass_hash)) return sendJson(res, 401, { error: 'invalid_credentials' });
       return sendJson(res, 200, { token: makeToken(user), user: publicUser(user) });
@@ -831,20 +994,25 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { user: publicUser(user) });
     }
     if (pathname === '/api/auth/google/start' && method === 'POST') {
-      const state = crypto.randomBytes(12).toString('hex');
+      /* OAuth Google réel uniquement si les identifiants sont configurés.
+         Aucun mode « démo » : il permettait de se connecter sans mot de passe. */
+      if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+        return sendJson(res, 200, { configured: false });
+      }
+      const state = crypto.randomBytes(16).toString('hex');
       db.oauth[state] = { status: 'pending', created: Date.now() };
       saveDb();
-      return sendJson(res, 200, { demo: true, state });
-    }
-    const gDemo = pathname.match(/^\/api\/auth\/google\/demo\/([^/]+)$/);
-    if (method === 'GET' && gDemo) {
-      const state = decodeURIComponent(gDemo[1]);
-      if (db.oauth[state]) {
-        const user = ensureGoogleUser();
-        db.oauth[state] = { status: 'done', token: makeToken(user), user: publicUser(user) };
-        saveDb();
-      }
-      return sendJson(res, 200, { ok: true });
+      const redirect = (process.env.PUBLIC_URL || ('https://' + (req.headers.host || 'localhost'))) + '/api/auth/google/callback';
+      const params = new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        redirect_uri: redirect,
+        response_type: 'code',
+        scope: 'openid email profile',
+        state,
+        access_type: 'online',
+        prompt: 'select_account'
+      });
+      return sendJson(res, 200, { configured: true, state, url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
     }
     const gStatus = pathname.match(/^\/api\/auth\/google\/status\/([^/]+)$/);
     if (method === 'GET' && gStatus) {
