@@ -146,3 +146,52 @@ cp data/db.json data/db-$(date +%F).json
 ```
 
 À faire avant chaque redéploiement qui remplace le volume.
+
+---
+
+## Déploiement automatique (GitHub → Render)
+
+Un job Hermes vérifie toutes les 5 minutes la tête de `ot4o4/drc-api` (branche
+`master`). Dès qu'un nouveau commit apparaît, il :
+
+1. sauvegarde la base (`GET /api/admin/backup`) — le déploiement est annulé si
+   la sauvegarde échoue ;
+2. déclenche le déploiement Render et attend que le commit déployé soit bien
+   celui de GitHub ;
+3. restaure la base, puis vérifie `/api/health` et `/api/admin/stats`.
+
+Script : `~/.hermes/scripts/drc_autodeploy.py` (état dans
+`~/.hermes/cache/drc-deploy-state.json`, journal dans `drc-deploy.log`).
+Il surveille aussi `ot4o4/drc-web` et redéploie le site de la même façon.
+
+> GitHub Actions n'est pas utilisé : le jeton GitHub du poste n'a pas le scope
+> `workflow`, nécessaire pour pousser un fichier `.github/workflows/*`. Les
+> workflows équivalents sont conservés dans `/root/ci-workflows/` ; il suffit
+> d'un jeton avec le scope `workflow` pour les activer.
+
+## Sécurité
+
+- **Limites de débit** (fenêtre glissante en mémoire) : 300 req/min/IP au
+  global, 15/min pour créer une commande, 10/10 min pour se connecter,
+  6/10 min pour créer un compte (et 6/10 min par numéro de téléphone),
+  120/10 min sur l'administration.
+- **Administration** : comparaison du jeton à temps constant ; 8 échecs →
+  blocage de l'IP pendant 30 minutes ; le service refuse de démarrer en
+  production si `ADMIN_TOKEN` est absent ou vaut `changeme`.
+- **Données personnelles** : `GET /api/orders?phone=` et
+  `GET /api/orders/:id` renvoient l'historique sans nom, adresse ni note
+  (téléphone masqué) ; seuls le propriétaire authentifié et le gérant voient
+  la commande complète.
+- **Webhooks de paiement** : refusés en 503 tant qu'aucun secret n'est
+  configuré (`WAVE_WEBHOOK_SECRET`, `ORANGE_WEBHOOK_SECRET`), signature
+  vérifiée à temps constant. Impossible de marquer une commande payée sans
+  signature valide.
+- **Google** : le mode « démo » qui permettait de se connecter sans mot de
+  passe a été supprimé. La connexion Google n'apparaît que si
+  `GOOGLE_CLIENT_ID` et `GOOGLE_CLIENT_SECRET` sont fournis.
+- **Mots de passe** : scrypt avec sel aléatoire ; jetons HMAC signés,
+  expiration 30 jours.
+- **En-têtes** : `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`,
+  `Permissions-Policy`, CSP `default-src 'none'`, HSTS, `Cache-Control:
+  no-store` sur toutes les réponses de l'API.
+
