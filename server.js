@@ -349,7 +349,26 @@ function publicOrder(o) {
     paid_at: o.paid_at || null,
     payment_refusal_reason: o.payment_refusal_reason || null,
     points_earned: o.points_earned,
-    customer: { zone: c.zone || '', phone_masked: maskPhone(c.phone) }
+    customer: {
+      zone: c.zone || '', phone_masked: maskPhone(c.phone),
+      address: c.address || '', lat: c.lat ?? null, lng: c.lng ?? null
+    }
+  };
+}
+
+/* Coordonnées de livraison : point choisi sur la carte (Dakar & banlieue). */
+function buildCustomer(c) {
+  const lat = Number(c.lat), lng = Number(c.lng);
+  const hasGeo = Number.isFinite(lat) && Number.isFinite(lng) &&
+    lat >= 12 && lat <= 17 && lng >= -18 && lng <= -11;
+  return {
+    name: String(c.name || '').trim().slice(0, 60),
+    phone: String(c.phone || '').trim().slice(0, 20),
+    zone: String(c.zone || '').slice(0, 60),
+    note: String(c.note || '').slice(0, 500),
+    address: String(c.address || '').slice(0, 180),
+    lat: hasGeo ? Number(lat.toFixed(6)) : null,
+    lng: hasGeo ? Number(lng.toFixed(6)) : null
   };
 }
 
@@ -730,12 +749,7 @@ async function handleRequest(req, res) {
         status: 'pending',
         created_at: new Date().toISOString(),
         items: cleanItems,
-        customer: {
-          name: customer.name.trim().slice(0, 60),
-          phone: customer.phone.trim().slice(0, 20),
-          zone: String(customer.zone || '').slice(0, 60),
-          note: String(customer.note || '').slice(0, 500)
-        },
+        customer: buildCustomer(customer),
         payment_method: paymentMethod,
         subtotal,
         discount,
