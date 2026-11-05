@@ -201,6 +201,15 @@ function saveDb() {
 }
 
 const db = loadDb();
+/* Migration douce des comptes existants (adresses, statut, email). */
+if (!Array.isArray(db.users)) db.users = [];
+if (!db.oauth || typeof db.oauth !== 'object') db.oauth = {};
+db.users.forEach((u) => {
+  if (!Array.isArray(u.addresses)) u.addresses = [];
+  if (!u.status) u.status = 'active';
+  if (typeof u.email !== 'string') u.email = '';
+  if (typeof u.token_version !== 'number') u.token_version = 0;
+});
 saveDb();
 
 /* -------------------------------- Helpers -------------------------------- */
@@ -534,7 +543,7 @@ function authSecret() {
   return db.auth_secret;
 }
 function makeToken(user) {
-  const payload = Buffer.from(JSON.stringify({ uid: user.id, exp: Date.now() + 30 * 864e5 })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ uid: user.id, tv: Number(user.token_version) || 0, exp: Date.now() + 30 * 864e5 })).toString('base64url');
   const sig = crypto.createHmac('sha256', authSecret()).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -548,10 +557,54 @@ function userFromRequest(req) {
     if (!crypto.timingSafeEqual(Buffer.from(parts[1]), Buffer.from(expect))) return null;
     const data = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
     if (!data.exp || data.exp < Date.now()) return null;
-    return db.users.find((u) => u.id === data.uid) || null;
+    const user = db.users.find((u) => u.id === data.uid) || null;
+    if (!user) return null;
+    if ((Number(data.tv) || 0) !== (Number(user.token_version) || 0)) return null;
+    if (user.status === 'disabled') return null;
+    return user;
   } catch (e) { return null; }
 }
-function publicUser(u) { return { id: u.id, name: u.name, phone: u.phone, points: Math.max(0, Number(u.points) || 0) }; }
+function publicUser(u) {
+  return {
+    id: u.id,
+    name: u.name,
+    phone: u.phone,
+    email: u.email || '',
+    points: Math.max(0, Number(u.points) || 0),
+    status: u.status || 'active',
+    addresses: Array.isArray(u.addresses) ? u.addresses : [],
+    created_at: u.created_at || null
+  };
+}
+
+/* Utilisateur authentifié et actif, ou réponse 401/403 déjà envoyée. */
+function requireUser(req, res) {
+  const u = userFromRequest(req);
+  if (!u) { sendJson(res, 401, { error: 'unauthorized' }); return null; }
+  if (u.status === 'disabled') { sendJson(res, 403, { error: 'account_disabled' }); return null; }
+  return u;
+}
+
+function validEmail(v) {
+  const e = String(v || '').trim();
+  if (!e) return '';
+  if (e.length > 120) return null;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) ? e : null;
+}
+
+function sanitizeAddress(body) {
+  const zone = String(body.zone || '').trim().slice(0, 60);
+  const details = String(body.details || '').trim().slice(0, 160);
+  const label = String(body.label || '').trim().slice(0, 30) || 'Adresse';
+  const rawPhone = body.phone ? normalizePhone(body.phone) : '';
+  if (!zone) return { error: 'zone_required' };
+  if (body.phone && !rawPhone) return { error: 'invalid_phone' };
+  return { value: { label, zone, details, phone: rawPhone || '', is_default: Boolean(body.is_default) } };
+}
+
+function setDefaultAddress(user, addressId) {
+  user.addresses.forEach((a) => { a.is_default = a.id === addressId; });
+}
 
 /* -------------------------------- Routes --------------------------------- */
 
@@ -815,6 +868,7 @@ async function handleRequest(req, res) {
         shipping: db.orders.filter((o) => o.status === 'shipping').length,
         by_status: countBy,
         products: db.products.length,
+        users: db.users.length,
         low_stock: db.products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= 5).length
       });
     }
@@ -873,6 +927,92 @@ async function handleRequest(req, res) {
         product: { id: product.id, name: product.name, price: product.price,
           stock: product.stock, available: product.available !== false }
       });
+    }
+
+    /* 6d. Administration — gestion des clients */
+    function adminUserRow(u) {
+      const key = phoneKey(u.phone);
+      const orders = db.orders.filter(
+        (o) => phoneKey(o.customer && o.customer.phone) === key && o.status !== 'cancelled'
+      );
+      return {
+        id: u.id,
+        name: u.name,
+        phone: u.phone,
+        email: u.email || '',
+        points: Math.max(0, Number(u.points) || 0),
+        status: u.status || 'active',
+        created_at: u.created_at || null,
+        last_login: u.last_login || null,
+        addresses: (u.addresses || []).length,
+        orders_count: orders.length,
+        total_spent: orders.reduce((sum, o) => sum + (Number(o.total) || 0), 0)
+      };
+    }
+
+    if (method === 'GET' && pathname === '/api/admin/users') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+      let users = db.users.map(adminUserRow);
+      if (q) {
+        users = users.filter((u) =>
+          String(u.name || '').toLowerCase().includes(q) ||
+          String(u.phone || '').includes(q) ||
+          String(u.email || '').toLowerCase().includes(q)
+        );
+      }
+      users.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+      return sendJson(res, 200, { users, total: db.users.length });
+    }
+
+    const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+    if (adminUserMatch && method === 'GET') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const user = db.users.find((u) => u.id === decodeURIComponent(adminUserMatch[1]));
+      if (!user) return sendJson(res, 404, { error: 'not_found' });
+      const key = phoneKey(user.phone);
+      const orders = db.orders.filter((o) => phoneKey(o.customer && o.customer.phone) === key);
+      return sendJson(res, 200, {
+        user: Object.assign(adminUserRow(user), {
+          addresses: user.addresses || [],
+          orders
+        })
+      });
+    }
+    if (adminUserMatch && method === 'PATCH') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const user = db.users.find((u) => u.id === decodeURIComponent(adminUserMatch[1]));
+      if (!user) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.status !== undefined) {
+        if (!['active', 'disabled'].includes(body.status)) return sendJson(res, 400, { error: 'invalid_status' });
+        user.status = body.status;
+        if (body.status === 'disabled') user.token_version = (Number(user.token_version) || 0) + 1;
+      }
+      if (body.points !== undefined) {
+        const pts = Number(body.points);
+        if (!Number.isFinite(pts) || pts < 0 || pts > 1000000) return sendJson(res, 400, { error: 'invalid_points' });
+        user.points = Math.round(pts);
+      }
+      if (typeof body.name === 'string' && body.name.trim().length >= 3) user.name = body.name.trim().slice(0, 60);
+      user.updated_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, { user: adminUserRow(user) });
+    }
+    const adminResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
+    if (adminResetMatch && method === 'POST') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const user = db.users.find((u) => u.id === decodeURIComponent(adminResetMatch[1]));
+      if (!user) return sendJson(res, 404, { error: 'not_found' });
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let temp = '';
+      const bytes = crypto.randomBytes(10);
+      for (let i = 0; i < 10; i++) temp += alphabet[bytes[i] % alphabet.length];
+      user.pass_hash = hashPassword(temp);
+      user.token_version = (Number(user.token_version) || 0) + 1;
+      user.password_reset_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, { ok: true, password: temp });
     }
 
     /* 6c. Sauvegarde / restauration (utile quand l'hébergeur n'a pas de disque) */
@@ -964,7 +1104,19 @@ async function handleRequest(req, res) {
         (o) => phoneKey(o.customer && o.customer.phone) === key && o.status !== 'cancelled'
       );
       const seedPoints = pastOrders.reduce((sum, o) => sum + Math.floor((Number(o.total) || 0) / 100), 0);
-      const user = { id: 'u' + Date.now().toString(36) + Math.floor(Math.random() * 999), name, phone, pass_hash: hashPassword(password), points: seedPoints, created_at: new Date().toISOString() };
+      const email = validEmail(body.email);
+      if (email === null) return sendJson(res, 400, { error: 'invalid_email' });
+      const user = {
+        id: 'u' + Date.now().toString(36) + Math.floor(Math.random() * 999),
+        name, phone, email,
+        pass_hash: hashPassword(password),
+        points: seedPoints,
+        status: 'active',
+        addresses: [],
+        token_version: 0,
+        created_at: new Date().toISOString(),
+        last_login: new Date().toISOString()
+      };
       db.users.push(user); saveDb();
       return sendJson(res, 201, { token: makeToken(user), user: publicUser(user) });
     }
@@ -986,12 +1138,110 @@ async function handleRequest(req, res) {
       }
       const user = phone ? db.users.find((u) => u.phone === phone) : null;
       if (!user || !verifyPassword(password, user.pass_hash)) return sendJson(res, 401, { error: 'invalid_credentials' });
+      if (user.status === 'disabled') return sendJson(res, 403, { error: 'account_disabled' });
+      user.last_login = new Date().toISOString();
+      saveDb();
       return sendJson(res, 200, { token: makeToken(user), user: publicUser(user) });
     }
     if (pathname === '/api/auth/me' && method === 'GET') {
-      const user = userFromRequest(req);
-      if (!user) return sendJson(res, 401, { error: 'unauthorized' });
+      const user = requireUser(req, res);
+      if (!user) return;
       return sendJson(res, 200, { user: publicUser(user) });
+    }
+    if (pathname === '/api/auth/me' && method === 'PATCH') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const rl = rateLimit(req, 'profile', 30, 10 * 60e3);
+      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retry)); return sendJson(res, 429, { error: 'rate_limited', retry_after: rl.retry }); }
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.name !== undefined) {
+        const name = String(body.name || '').trim().slice(0, 60);
+        if (name.length < 3) return sendJson(res, 400, { error: 'invalid_name' });
+        user.name = name;
+      }
+      if (body.email !== undefined) {
+        const email = validEmail(body.email);
+        if (email === null) return sendJson(res, 400, { error: 'invalid_email' });
+        user.email = email;
+      }
+      user.updated_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, { user: publicUser(user) });
+    }
+    if (pathname === '/api/auth/password' && method === 'POST') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const rl = rateLimit(req, 'password_change', 10, 10 * 60e3);
+      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retry)); return sendJson(res, 429, { error: 'rate_limited', retry_after: rl.retry }); }
+      const body = parseJsonBody(await readBody(req)) || {};
+      const current = String(body.current || '');
+      const next = String(body.new || '');
+      if (!verifyPassword(current, user.pass_hash)) return sendJson(res, 401, { error: 'invalid_current_password' });
+      if (next.length < 6 || next.length > 128) return sendJson(res, 400, { error: 'invalid_password' });
+      user.pass_hash = hashPassword(next);
+      user.token_version = (Number(user.token_version) || 0) + 1;  /* déconnecte les autres appareils */
+      user.updated_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, { ok: true, token: makeToken(user), user: publicUser(user) });
+    }
+
+    /* Carnet d'adresses du client */
+    if (pathname === '/api/addresses' && method === 'GET') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      return sendJson(res, 200, { addresses: user.addresses || [] });
+    }
+    if (pathname === '/api/addresses' && method === 'POST') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const rl = rateLimit(req, 'addresses', 60, 60e3);
+      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retry)); return sendJson(res, 429, { error: 'rate_limited', retry_after: rl.retry }); }
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (user.addresses.length >= 8) return sendJson(res, 400, { error: 'too_many_addresses' });
+      const parsed = sanitizeAddress(body);
+      if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+      const address = Object.assign({ id: 'a' + Date.now().toString(36) + Math.floor(Math.random() * 999), created_at: new Date().toISOString() }, parsed.value);
+      user.addresses.push(address);
+      if (user.addresses.length === 1 || address.is_default) setDefaultAddress(user, address.id);
+      saveDb();
+      return sendJson(res, 201, { address, addresses: user.addresses });
+    }
+    const addressMatch = pathname.match(/^\/api\/addresses\/([^/]+)$/);
+    if (addressMatch && method === 'PATCH') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const id = decodeURIComponent(addressMatch[1]);
+      const address = user.addresses.find((a) => a.id === id);
+      if (!address) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.label !== undefined) address.label = String(body.label || 'Adresse').trim().slice(0, 30) || 'Adresse';
+      if (body.zone !== undefined) {
+        const zone = String(body.zone || '').trim().slice(0, 60);
+        if (!zone) return sendJson(res, 400, { error: 'zone_required' });
+        address.zone = zone;
+      }
+      if (body.details !== undefined) address.details = String(body.details || '').trim().slice(0, 160);
+      if (body.phone !== undefined) {
+        const phone = body.phone ? normalizePhone(body.phone) : '';
+        if (body.phone && !phone) return sendJson(res, 400, { error: 'invalid_phone' });
+        address.phone = phone || '';
+      }
+      if (body.is_default) setDefaultAddress(user, address.id);
+      address.updated_at = new Date().toISOString();
+      saveDb();
+      return sendJson(res, 200, { address, addresses: user.addresses });
+    }
+    if (addressMatch && method === 'DELETE') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const id = decodeURIComponent(addressMatch[1]);
+      const idx = user.addresses.findIndex((a) => a.id === id);
+      if (idx < 0) return sendJson(res, 404, { error: 'not_found' });
+      const wasDefault = user.addresses[idx].is_default;
+      user.addresses.splice(idx, 1);
+      if (wasDefault && user.addresses.length) setDefaultAddress(user, user.addresses[0].id);
+      saveDb();
+      return sendJson(res, 200, { ok: true, addresses: user.addresses });
     }
     if (pathname === '/api/auth/google/start' && method === 'POST') {
       /* OAuth Google réel uniquement si les identifiants sont configurés.
