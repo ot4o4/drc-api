@@ -16,6 +16,8 @@ const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme';
+const DRIVER_TOKEN = process.env.DRIVER_TOKEN || '';
+const DRIVER_ID = process.env.DRIVER_ID || 'driver-1';
 const IS_HOSTED = Boolean(process.env.RENDER || process.env.NODE_ENV === 'production');
 if (IS_HOSTED && (!process.env.ADMIN_TOKEN || ADMIN_TOKEN === 'changeme')) {
   console.error('[sécurité] ADMIN_TOKEN manquant ou par défaut — démarrage refusé.');
@@ -208,6 +210,7 @@ function saveDb() {
 const db = loadDb();
 /* Migration douce des comptes existants (adresses, statut, email). */
 if (!Array.isArray(db.users)) db.users = [];
+if (!Array.isArray(db.messages)) db.messages = [];
 if (!db.oauth || typeof db.oauth !== 'object') db.oauth = {};
 db.users.forEach((u) => {
   if (!Array.isArray(u.addresses)) u.addresses = [];
@@ -233,7 +236,7 @@ function sendJson(res, status, payload) {
     'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, x-admin-token',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, x-admin-token, X-Order-Token, x-order-token, X-Message-Role, x-message-role',
     'Access-Control-Max-Age': '86400'
   });
   res.end(body);
@@ -329,6 +332,21 @@ function isAdmin(req) {
   return ok;
 }
 
+function isDriver(req) {
+  if (!DRIVER_TOKEN) return false;
+  return safeEqual(String(req.headers['x-admin-token'] || ''), DRIVER_TOKEN);
+}
+
+function orderAccess(req, order) {
+  if (isAdmin(req)) return 'admin';
+  if (isDriver(req)) {
+    const assigned = order.driver && order.driver.id;
+    return assigned === DRIVER_ID ? 'driver' : null;
+  }
+  const token = String(req.headers['x-order-token'] || '');
+  return order.customer_token && safeEqual(token, order.customer_token) ? 'customer' : null;
+}
+
 function maskPhone(p) {
   const s = String(p == null ? '' : p);
   if (s.length < 6) return '•••';
@@ -351,6 +369,8 @@ function publicOrder(o) {
     total: o.total,
     payment: o.payment,
     payment_status: o.payment_status || (o.status === 'paid' ? 'paid' : 'unpaid'),
+    payment_confirmed: o.payment_confirmed === true || o.payment_status === 'paid',
+    driver: o.driver || null,
     paid_at: o.paid_at || null,
     payment_refusal_reason: o.payment_refusal_reason || null,
     points_earned: o.points_earned,
@@ -404,7 +424,8 @@ async function notifyManager(o) {
 }
 
 function buildCustomer(c) {
-  const lat = Number(c.lat), lng = Number(c.lng);
+  const gps = String(c.gps || '').split(',').map(v => v.trim());
+  const lat = Number(c.lat ?? gps[0]), lng = Number(c.lng ?? gps[1]);
   const hasGeo = Number.isFinite(lat) && Number.isFinite(lng) &&
     lat >= 12 && lat <= 17 && lng >= -18 && lng <= -11;
   return {
@@ -417,7 +438,8 @@ function buildCustomer(c) {
     email: String(c.email || '').slice(0, 80),
     address: String(c.address || '').slice(0, 180),
     lat: hasGeo ? Number(lat.toFixed(6)) : null,
-    lng: hasGeo ? Number(lng.toFixed(6)) : null
+    lng: hasGeo ? Number(lng.toFixed(6)) : null,
+    gps_accuracy: Math.max(0, Number(c.gps_accuracy) || 0)
   };
 }
 
@@ -696,7 +718,7 @@ async function handleRequest(req, res) {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, x-admin-token',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, x-admin-token, X-Order-Token, x-order-token, X-Message-Role, x-message-role',
       'Access-Control-Max-Age': '86400'
     });
     res.end();
@@ -723,7 +745,7 @@ async function handleRequest(req, res) {
         },
         auth: { google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) },
         notify: { telegram: Boolean(TELEGRAM_TOKEN && TELEGRAM_CHAT), webhook: Boolean(ORDER_WEBHOOK) },
-        version: '7.7'
+        version: '7.8'
       });
       return;
     }
@@ -765,6 +787,12 @@ async function handleRequest(req, res) {
         return sendJson(res, 400, { error: 'invalid' });
       }
 
+      const clientOrderId = String(body.client_order_id || '').trim().slice(0, 100);
+      if (clientOrderId) {
+        const existing = db.orders.find(o => o.client_order_id === clientOrderId);
+        if (existing) return sendJson(res, 200, { order: existing, customer_token: existing.customer_token });
+      }
+
       // Les prix sont re-résolus depuis la base : un client ne peut pas les falsifier.
       const resolvedItems = [];
       for (const it of items) {
@@ -803,6 +831,8 @@ async function handleRequest(req, res) {
       const orderId = nextOrderId();
       const order = {
         id: orderId,
+        client_order_id: clientOrderId || null,
+        customer_token: crypto.randomBytes(24).toString('base64url'),
         status: 'pending',
         created_at: new Date().toISOString(),
         items: cleanItems,
@@ -814,7 +844,9 @@ async function handleRequest(req, res) {
         delivery_fee: deliveryFee,
         total,
         payment: null,
-        payment_status: paymentMethod === 'cod' ? 'cod_pending' : 'awaiting'
+        payment_status: paymentMethod === 'cod' ? 'cod_pending' : 'awaiting',
+        payment_confirmed: false,
+        driver: null
       };
 
       if (paymentMethod === 'cod') {
@@ -910,7 +942,39 @@ async function handleRequest(req, res) {
       if (!order) return sendJson(res, 404, { error: 'not_found' });
       const user = userFromRequest(req);
       const owner = Boolean(user && phoneKey(user.phone) === phoneKey(order.customer && order.customer.phone));
-      return sendJson(res, 200, { order: (owner || isAdmin(req)) ? order : publicOrder(order) });
+      return sendJson(res, 200, { order: (owner || orderAccess(req, order)) ? order : publicOrder(order) });
+    }
+
+    /* 5b. Conversation persistante d'une commande. */
+    const messageMatch = pathname.match(/^\/api\/orders\/([^/]+)\/messages$/);
+    if (messageMatch && (method === 'GET' || method === 'POST')) {
+      const order = db.orders.find(o => o.id === decodeURIComponent(messageMatch[1]));
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      const access = orderAccess(req, order);
+      if (!access) return sendJson(res, 403, { error: 'forbidden' });
+      if (method === 'GET') {
+        const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
+        let rows = db.messages.filter(m => m.order_id === order.id && m.id > after).sort((a, b) => a.id - b.id);
+        rows = after ? rows.slice(0, 200) : rows.slice(-200);
+        return sendJson(res, 200, rows);
+      }
+      const body = parseJsonBody(await readBody(req)) || {};
+      const text = String(body.text || '').trim();
+      if (!text || text.length > 1000) return sendJson(res, 422, { error: 'invalid_message' });
+      const declared = String(req.headers['x-message-role'] || '');
+      if (declared && declared !== access) return sendJson(res, 403, { error: 'invalid_role' });
+      const senderName = access === 'customer' ? order.customer.name : access === 'driver' ? order.driver.name : 'Gérant DRC';
+      const message = {
+        id: db.messages.reduce((max, m) => Math.max(max, Number(m.id) || 0), 0) + 1,
+        order_id: order.id,
+        sender_role: access,
+        sender_name: senderName,
+        text,
+        created_at: new Date().toISOString()
+      };
+      db.messages.push(message);
+      saveDb();
+      return sendJson(res, 201, message);
     }
 
     /* 6. Administration */
@@ -950,6 +1014,28 @@ async function handleRequest(req, res) {
       });
     }
 
+    /* 6a. Livreur — uniquement les missions attribuées à DRIVER_ID. */
+    if (method === 'GET' && pathname === '/api/driver/orders') {
+      if (!isDriver(req)) return sendJson(res, 401, { error: 'unauthorized' });
+      return sendJson(res, 200, { orders: db.orders.filter(o => o.driver && o.driver.id === DRIVER_ID) });
+    }
+    const driverOrderMatch = pathname.match(/^\/api\/driver\/orders\/([^/]+)$/);
+    if (driverOrderMatch && method === 'PATCH') {
+      if (!isDriver(req)) return sendJson(res, 401, { error: 'unauthorized' });
+      const order = db.orders.find(o => o.id === decodeURIComponent(driverOrderMatch[1]));
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      if (!order.driver || order.driver.id !== DRIVER_ID) return sendJson(res, 403, { error: 'forbidden' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const next = body.status;
+      const valid = (order.status === 'preparing' && next === 'shipping') || (order.status === 'shipping' && next === 'delivered');
+      if (!valid) return sendJson(res, 409, { error: 'invalid_transition' });
+      order.status = next;
+      order.updated_at = new Date().toISOString();
+      if (next === 'delivered') order.delivered_at = order.updated_at;
+      saveDb();
+      return sendJson(res, 200, { order });
+    }
+
     const adminOrderMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)$/);
     if (adminOrderMatch && (method === 'PATCH' || method === 'POST')) {
       if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
@@ -966,9 +1052,24 @@ async function handleRequest(req, res) {
           order.paid_at = order.paid_at || new Date().toISOString();
         }
       }
+      if (body.driver !== undefined) {
+        if (body.driver === null) order.driver = null;
+        else {
+          const d = body.driver || {};
+          if (!d.id || !String(d.name || '').trim() || !String(d.phone || '').trim()) return sendJson(res, 400, { error: 'invalid_driver' });
+          order.driver = { id: String(d.id).slice(0, 100), name: String(d.name).trim().slice(0, 80), phone: String(d.phone).trim().slice(0, 30) };
+        }
+      }
+      if (typeof body.payment_confirmed === 'boolean') {
+        order.payment_confirmed = body.payment_confirmed;
+        order.payment_status = body.payment_confirmed ? 'paid' : 'awaiting';
+        order.paid_at = body.payment_confirmed ? (order.paid_at || new Date().toISOString()) : null;
+      }
+      if (['shipping', 'delivered'].includes(body.status) && !order.driver) return sendJson(res, 400, { error: 'driver_required' });
       if (typeof body.note === 'string') order.admin_note = body.note.slice(0, 500);
       order.updated_at = new Date().toISOString();
       if (body.status === 'delivered') order.delivered_at = order.updated_at;
+      else if (body.status) order.delivered_at = null;
       saveDb();
       return sendJson(res, 200, { order });
     }
@@ -994,6 +1095,7 @@ async function handleRequest(req, res) {
           order.status = 'confirmed';
         }
         order.payment_review = { action: 'confirm', at: now, by: 'gerant' };
+        order.payment_confirmed = true;
       } else {
         const reason = String(body.reason || '').trim().slice(0, 300) || 'Paiement non reçu';
         order.payment_status = 'refused';
@@ -1001,6 +1103,7 @@ async function handleRequest(req, res) {
         order.payment_refusal_reason = reason;
         order.status = 'cancelled';
         order.payment_review = { action: 'refuse', at: now, reason, by: 'gerant' };
+        order.payment_confirmed = false;
       }
       order.updated_at = now;
       saveDb();
@@ -1150,6 +1253,7 @@ async function handleRequest(req, res) {
       }
       db.products = incoming.products;
       db.orders = incoming.orders;
+      db.messages = Array.isArray(incoming.messages) ? incoming.messages : [];
       db.users = Array.isArray(incoming.users) ? incoming.users : [];
       db.sequences = incoming.sequences && typeof incoming.sequences === 'object' ? incoming.sequences : {};
       db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};

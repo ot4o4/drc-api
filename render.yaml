@@ -11,6 +11,10 @@ services:
         value: "20"
       - key: ADMIN_TOKEN
         generateValue: true
+      - key: DRIVER_TOKEN
+        generateValue: true
+      - key: DRIVER_ID
+        value: driver-1
       - key: SHOP_PHONE
         value: "+221 77 000 00 00"
       # A décommenter avec les clés marchands (voir PAYMENTS.md) :
