@@ -11,10 +11,13 @@ services:
         value: "20"
       - key: ADMIN_TOKEN
         generateValue: true
+      # Code du livreur principal : choisir une valeur lisible (ex. DRC-1234-5678), pas generateValue.
       - key: DRIVER_TOKEN
-        generateValue: true
+        sync: false
       - key: DRIVER_ID
         value: driver-1
+      - key: DRIVER_NAME
+        value: Livreur DRC
       - key: SHOP_PHONE
         value: "+221 77 000 00 00"
       # A décommenter avec les clés marchands (voir PAYMENTS.md) :

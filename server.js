@@ -2,7 +2,7 @@
  * Darou Rahman Chicken — API
  * Serveur Node.js SANS AUCUNE DÉPENDANCE (node:http / node:https uniquement).
  * Lancement : node server.js
- * Persistance : fichier JSON (/root/drc-api/data/db.json)
+ * Persistance : fichier JSON (data/db.json à côté de server.js)
  */
 'use strict';
 
@@ -16,8 +16,20 @@ const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme';
+/* Livreur principal défini sur l'hébergeur (toujours disponible, même après une remise à zéro
+   de la base). Les autres livreurs se créent dans l'espace gérant (db.drivers). */
 const DRIVER_TOKEN = process.env.DRIVER_TOKEN || '';
 const DRIVER_ID = process.env.DRIVER_ID || 'driver-1';
+const DRIVER_NAME = process.env.DRIVER_NAME || 'Livreur DRC';
+const DRIVER_PHONE = process.env.DRIVER_PHONE || '';
+/* Point de départ des tournées (itinéraire du portail livreur). */
+const DEPOT = {
+  lat: Number(process.env.DEPOT_LAT) || 14.757605,
+  lng: Number(process.env.DEPOT_LNG) || -17.445161,
+  label: process.env.DEPOT_LABEL || 'Dépôt DRC · Parcelles Assainies U20'
+};
+const BOOT_ID = Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36);
+const BOOTED_AT = new Date().toISOString();
 const IS_HOSTED = Boolean(process.env.RENDER || process.env.NODE_ENV === 'production');
 if (IS_HOSTED && (!process.env.ADMIN_TOKEN || ADMIN_TOKEN === 'changeme')) {
   console.error('[sécurité] ADMIN_TOKEN manquant ou par défaut — démarrage refusé.');
@@ -211,6 +223,7 @@ const db = loadDb();
 /* Migration douce des comptes existants (adresses, statut, email). */
 if (!Array.isArray(db.users)) db.users = [];
 if (!Array.isArray(db.messages)) db.messages = [];
+if (!Array.isArray(db.drivers)) db.drivers = [];
 if (!db.oauth || typeof db.oauth !== 'object') db.oauth = {};
 db.users.forEach((u) => {
   if (!Array.isArray(u.addresses)) u.addresses = [];
@@ -218,7 +231,24 @@ db.users.forEach((u) => {
   if (typeof u.email !== 'string') u.email = '';
   if (typeof u.token_version !== 'number') u.token_version = 0;
 });
+ensureEnvDriver();
 saveDb();
+
+/* Le livreur principal (variables DRIVER_*) existe toujours : après une base vierge ou une
+   restauration, il est recréé avec le code défini sur l'hébergeur. */
+function ensureEnvDriver() {
+  if (!Array.isArray(db.drivers)) db.drivers = [];
+  if (!DRIVER_TOKEN) return;
+  const existing = db.drivers.find((d) => d.id === DRIVER_ID);
+  if (existing) {
+    if (!existing.code) existing.code = DRIVER_TOKEN;
+    return;
+  }
+  db.drivers.unshift({
+    id: DRIVER_ID, name: DRIVER_NAME, phone: DRIVER_PHONE, code: DRIVER_TOKEN,
+    active: true, source: 'env', created_at: new Date().toISOString()
+  });
+}
 
 /* -------------------------------- Helpers -------------------------------- */
 
@@ -317,34 +347,93 @@ function adminBlocked(req) {
   return Boolean(rec && rec.blockedUntil && rec.blockedUntil > Date.now());
 }
 function adminFailed(req) {
+  if (req._authFailCounted) return;      /* un seul échec compté par requête */
+  req._authFailCounted = true;
   const ip = clientIp(req);
   const rec = ADMIN_FAILS.get(ip) || { count: 0, blockedUntil: 0 };
   rec.count += 1;
   if (rec.count >= ADMIN_FAIL_LIMIT) { rec.blockedUntil = Date.now() + ADMIN_BLOCK_MS; rec.count = 0; }
   ADMIN_FAILS.set(ip, rec);
 }
+
+/* Codes livreur : insensibles à la casse, aux espaces et aux tirets (« drc 1234 5678 » = « DRC-1234-5678 »). */
+function normCode(code) {
+  return String(code == null ? '' : code).trim().toUpperCase().replace(/[\s\-_.]/g, '');
+}
+function driverForCode(code) {
+  const given = normCode(code);
+  if (given.length < 6) return null;
+  let found = null;
+  for (const d of db.drivers || []) {
+    if (d && d.active !== false && d.code && safeEqual(normCode(d.code), given)) found = found || d;
+  }
+  return found;
+}
 function isAdmin(req) {
   if (!ADMIN_TOKEN || ADMIN_TOKEN === 'changeme') return false;
   if (adminBlocked(req)) return false;
   const given = String(req.headers['x-admin-token'] || '');
   const ok = safeEqual(given, ADMIN_TOKEN);
-  if (!ok && given) adminFailed(req);
+  /* Un code livreur valide n'est pas une tentative ratée : sans ce garde-fou, les
+     rafraîchissements du portail livreur bloquaient l'espace gérant (même réseau). */
+  if (!ok && given && !driverForCode(given)) adminFailed(req);
   return ok;
 }
 
+/* Livreur authentifié par son code (en-tête X-Admin-Token, comme le gérant). */
+function currentDriver(req) {
+  const given = String(req.headers['x-admin-token'] || '');
+  if (!given) return null;
+  if (adminBlocked(req)) return null;
+  const d = driverForCode(given);
+  if (!d && !safeEqual(given, ADMIN_TOKEN)) adminFailed(req);
+  return d;
+}
 function isDriver(req) {
-  if (!DRIVER_TOKEN) return false;
-  return safeEqual(String(req.headers['x-admin-token'] || ''), DRIVER_TOKEN);
+  return Boolean(currentDriver(req));
 }
 
 function orderAccess(req, order) {
   if (isAdmin(req)) return 'admin';
-  if (isDriver(req)) {
-    const assigned = order.driver && order.driver.id;
-    return assigned === DRIVER_ID ? 'driver' : null;
+  if (req.headers['x-admin-token']) {
+    const d = currentDriver(req);
+    return d && order.driver && order.driver.id === d.id ? 'driver' : null;
   }
   const token = String(req.headers['x-order-token'] || '');
-  return order.customer_token && safeEqual(token, order.customer_token) ? 'customer' : null;
+  if (token && order.customer_token && safeEqual(token, order.customer_token)) return 'customer';
+  /* Le client connecté retrouve la conversation de ses commandes sur tous ses appareils. */
+  const user = userFromRequest(req);
+  if (user && phoneKey(user.phone) && phoneKey(user.phone) === phoneKey(order.customer && order.customer.phone)) return 'customer';
+  return null;
+}
+
+/* Fiche livreur exposée au client et au gérant (jamais le code). */
+function driverCard(d) {
+  if (!d) return null;
+  return { id: d.id, name: d.name || 'Livreur DRC', phone: d.phone || '' };
+}
+function adminDriverRow(d) {
+  const mine = db.orders.filter((o) => o.driver && o.driver.id === d.id);
+  return {
+    id: d.id, name: d.name || '', phone: d.phone || '', code: d.code || '',
+    active: d.active !== false, source: d.source || 'admin',
+    created_at: d.created_at || null, updated_at: d.updated_at || null,
+    active_missions: mine.filter((o) => ['confirmed', 'preparing', 'paid', 'shipping'].includes(o.status)).length,
+    delivered: mine.filter((o) => o.status === 'delivered').length
+  };
+}
+function newDriverCode() {
+  const n = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
+  let code;
+  do { code = 'DRC-' + n() + '-' + n(); } while (driverForCode(code) || safeEqual(normCode(code), normCode(ADMIN_TOKEN)));
+  return code;
+}
+
+/* Commande sans secret de suivi : pour le gérant, le livreur et le client authentifié. */
+function privateOrder(o) {
+  if (!o) return null;
+  const { customer_token, client_order_id, ...rest } = o;
+  return rest;
 }
 
 function maskPhone(p) {
@@ -370,14 +459,12 @@ function publicOrder(o) {
     payment: o.payment,
     payment_status: o.payment_status || (o.status === 'paid' ? 'paid' : 'unpaid'),
     payment_confirmed: o.payment_confirmed === true || o.payment_status === 'paid',
-    driver: o.driver || null,
+    driver: o.driver ? { name: o.driver.name || 'Livreur DRC', phone: o.driver.phone || '' } : null,
     paid_at: o.paid_at || null,
     payment_refusal_reason: o.payment_refusal_reason || null,
     points_earned: o.points_earned,
-    customer: {
-      zone: c.zone || '', phone_masked: maskPhone(c.phone),
-      address: c.address || '', lat: c.lat ?? null, lng: c.lng ?? null
-    }
+    /* Ni nom, ni adresse, ni coordonnées GPS : les numéros de commande se devinent. */
+    customer: { zone: c.zone || '', phone_masked: maskPhone(c.phone) }
   };
 }
 
@@ -745,7 +832,10 @@ async function handleRequest(req, res) {
         },
         auth: { google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) },
         notify: { telegram: Boolean(TELEGRAM_TOKEN && TELEGRAM_CHAT), webhook: Boolean(ORDER_WEBHOOK) },
-        version: '7.8'
+        drivers: { configured: (db.drivers || []).some((d) => d.active !== false && d.code) },
+        depot: DEPOT,
+        boot: { id: BOOT_ID, at: BOOTED_AT },
+        version: '7.9'
       });
       return;
     }
@@ -792,6 +882,8 @@ async function handleRequest(req, res) {
         const existing = db.orders.find(o => o.client_order_id === clientOrderId);
         if (existing) return sendJson(res, 200, { order: existing, customer_token: existing.customer_token });
       }
+      /* Le site envoie « promo_code », l'application « promo » : les deux sont acceptés. */
+      const promoCode = String(body.promo || body.promo_code || '').trim();
 
       // Les prix sont re-résolus depuis la base : un client ne peut pas les falsifier.
       const resolvedItems = [];
@@ -815,16 +907,22 @@ async function handleRequest(req, res) {
 
       let discount = 0;
       let promo = null;
-      if (body.promo) {
-        const verdict = evaluatePromo(body.promo, customer.phone, subtotal);
-        if (!verdict.ok) {
+      let promoRejected = null;
+      if (promoCode) {
+        const verdict = evaluatePromo(promoCode, customer.phone, subtotal);
+        if (!verdict.ok && body.promo) {
           return sendJson(res, 400, {
             error: 'invalid_promo', reason: verdict.error,
             ...(verdict.min_subtotal ? { min_subtotal: verdict.min_subtotal } : {})
           });
         }
-        discount = verdict.discount;
-        promo = { code: verdict.code, label: verdict.label, percent: verdict.percent };
+        if (!verdict.ok) {
+          /* Site web : la commande passe sans remise plutôt que d'échouer, et le client est prévenu. */
+          promoRejected = verdict.error;
+        } else {
+          discount = verdict.discount;
+          promo = { code: verdict.code, label: verdict.label, percent: verdict.percent };
+        }
       }
       const total = Math.max(0, subtotal - discount) + deliveryFee;
 
@@ -848,6 +946,7 @@ async function handleRequest(req, res) {
         payment_confirmed: false,
         driver: null
       };
+      if (promoRejected) order.promo_rejected = promoRejected;
 
       if (paymentMethod === 'cod') {
         order.status = 'confirmed';
@@ -925,7 +1024,7 @@ async function handleRequest(req, res) {
       const user = userFromRequest(req);
       if (!user) return sendJson(res, 401, { error: 'unauthorized' });
       const key = phoneKey(user.phone);
-      const orders = db.orders.filter((o) => phoneKey(o.customer && o.customer.phone) === key);
+      const orders = db.orders.filter((o) => phoneKey(o.customer && o.customer.phone) === key).map(privateOrder);
       return sendJson(res, 200, { orders });
     }
 
@@ -942,7 +1041,7 @@ async function handleRequest(req, res) {
       if (!order) return sendJson(res, 404, { error: 'not_found' });
       const user = userFromRequest(req);
       const owner = Boolean(user && phoneKey(user.phone) === phoneKey(order.customer && order.customer.phone));
-      return sendJson(res, 200, { order: (owner || orderAccess(req, order)) ? order : publicOrder(order) });
+      return sendJson(res, 200, { order: (owner || orderAccess(req, order)) ? privateOrder(order) : publicOrder(order) });
     }
 
     /* 5b. Conversation persistante d'une commande. */
@@ -985,7 +1084,7 @@ async function handleRequest(req, res) {
         return sendJson(res, 429, { error: 'rate_limited', retry_after: rlAdmin.retry });
       }
       if (!isAdmin(req)) return sendJson(res, 401, { error: 'unauthorized' });
-      return sendJson(res, 200, { orders: db.orders });
+      return sendJson(res, 200, { orders: db.orders.map(privateOrder) });
     }
 
     /* 6b. Administration — statistiques, statuts de commande, produits */
@@ -1010,30 +1109,46 @@ async function handleRequest(req, res) {
         payments_to_review: db.orders.filter((o) => o.payment_status === 'awaiting' || ['awaiting_payment', 'awaiting_payment_manual'].includes(o.status || '')).length,
         products: db.products.length,
         users: db.users.length,
+        drivers: (db.drivers || []).filter((d) => d.active !== false).length,
+        to_assign: db.orders.filter((o) => ['confirmed', 'preparing', 'paid'].includes(o.status) && !o.driver).length,
         low_stock: db.products.filter((p) => Number(p.stock) > 0 && Number(p.stock) <= 5).length
       });
     }
 
-    /* 6a. Livreur — uniquement les missions attribuées à DRIVER_ID. */
-    if (method === 'GET' && pathname === '/api/driver/orders') {
-      if (!isDriver(req)) return sendJson(res, 401, { error: 'unauthorized' });
-      return sendJson(res, 200, { orders: db.orders.filter(o => o.driver && o.driver.id === DRIVER_ID) });
+    /* 6a. Livreur — uniquement les missions qui lui sont attribuées. */
+    const DRIVER_STATUSES = ['confirmed', 'preparing', 'paid', 'shipping', 'delivered'];
+    if (method === 'GET' && (pathname === '/api/driver/orders' || pathname === '/api/driver/me')) {
+      const me = currentDriver(req);
+      if (!me) return sendJson(res, 401, { error: 'unauthorized' });
+      const orders = db.orders
+        .filter((o) => o.driver && o.driver.id === me.id && DRIVER_STATUSES.includes(o.status))
+        .map(privateOrder);
+      return sendJson(res, 200, { driver: driverCard(me), depot: DEPOT, orders });
     }
     const driverOrderMatch = pathname.match(/^\/api\/driver\/orders\/([^/]+)$/);
     if (driverOrderMatch && method === 'PATCH') {
-      if (!isDriver(req)) return sendJson(res, 401, { error: 'unauthorized' });
+      const me = currentDriver(req);
+      if (!me) return sendJson(res, 401, { error: 'unauthorized' });
       const order = db.orders.find(o => o.id === decodeURIComponent(driverOrderMatch[1]));
       if (!order) return sendJson(res, 404, { error: 'not_found' });
-      if (!order.driver || order.driver.id !== DRIVER_ID) return sendJson(res, 403, { error: 'forbidden' });
+      if (!order.driver || order.driver.id !== me.id) return sendJson(res, 403, { error: 'forbidden' });
       const body = parseJsonBody(await readBody(req)) || {};
       const next = body.status;
-      const valid = (order.status === 'preparing' && next === 'shipping') || (order.status === 'shipping' && next === 'delivered');
-      if (!valid) return sendJson(res, 409, { error: 'invalid_transition' });
+      /* Récupération au dépôt dès que la commande est confirmée, puis livraison. */
+      const valid = (['confirmed', 'preparing', 'paid'].includes(order.status) && next === 'shipping') ||
+        (order.status === 'shipping' && next === 'delivered');
+      if (!valid) return sendJson(res, 409, { error: 'invalid_transition', status: order.status });
+      const now = new Date().toISOString();
       order.status = next;
-      order.updated_at = new Date().toISOString();
-      if (next === 'delivered') order.delivered_at = order.updated_at;
+      order.updated_at = now;
+      if (next === 'shipping') order.picked_up_at = now;
+      if (next === 'delivered') {
+        order.delivered_at = now;
+        /* Espèces : le livreur a remis la commande contre paiement. */
+        if (order.payment_method === 'cod' && order.payment_status !== 'paid') order.payment_status = 'cod_collected';
+      }
       saveDb();
-      return sendJson(res, 200, { order });
+      return sendJson(res, 200, { order: privateOrder(order) });
     }
 
     const adminOrderMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)$/);
@@ -1044,34 +1159,53 @@ async function handleRequest(req, res) {
       if (!order) return sendJson(res, 404, { error: 'not_found' });
       const body = parseJsonBody(await readBody(req)) || {};
       const allowed = ['pending', 'confirmed', 'preparing', 'shipping', 'delivered', 'cancelled', 'paid'];
+      /* Tout est validé avant la moindre écriture : une requête refusée ne laisse rien à moitié modifié. */
+      if (body.status && !allowed.includes(body.status)) return sendJson(res, 400, { error: 'invalid_status' });
+      if (body.driver_id !== undefined && body.driver === undefined) {
+        body.driver = body.driver_id ? { id: body.driver_id } : null;
+      }
+      let nextDriver = order.driver || null;
+      if (body.driver !== undefined) {
+        if (body.driver === null || body.driver === '') nextDriver = null;
+        else {
+          const d = body.driver || {};
+          const known = (db.drivers || []).find((x) => x.id === String(d.id || ''));
+          if (known && known.active === false) return sendJson(res, 400, { error: 'driver_inactive' });
+          const name = String(d.name || (known && known.name) || '').trim();
+          const phone = String(d.phone || (known && known.phone) || '').trim();
+          if (!d.id || !name) return sendJson(res, 400, { error: 'invalid_driver' });
+          if (!known && !phone) return sendJson(res, 400, { error: 'invalid_driver' });
+          nextDriver = { id: String(d.id).slice(0, 100), name: name.slice(0, 80), phone: phone.slice(0, 30) };
+        }
+      }
+      if (body.status === 'shipping' && !nextDriver) return sendJson(res, 400, { error: 'driver_required' });
+
+      const now = new Date().toISOString();
+      if (body.driver !== undefined) {
+        const changed = (nextDriver && nextDriver.id) !== (order.driver && order.driver.id);
+        order.driver = nextDriver;
+        if (changed) order.assigned_at = nextDriver ? now : null;
+      }
       if (body.status) {
-        if (!allowed.includes(body.status)) return sendJson(res, 400, { error: 'invalid_status' });
         order.status = body.status;
         if (body.status === 'paid') {
           order.payment_status = 'paid';
-          order.paid_at = order.paid_at || new Date().toISOString();
+          order.payment_confirmed = true;
+          order.paid_at = order.paid_at || now;
         }
-      }
-      if (body.driver !== undefined) {
-        if (body.driver === null) order.driver = null;
-        else {
-          const d = body.driver || {};
-          if (!d.id || !String(d.name || '').trim() || !String(d.phone || '').trim()) return sendJson(res, 400, { error: 'invalid_driver' });
-          order.driver = { id: String(d.id).slice(0, 100), name: String(d.name).trim().slice(0, 80), phone: String(d.phone).trim().slice(0, 30) };
-        }
+        if (body.status === 'delivered') order.delivered_at = now;
+        else order.delivered_at = null;
       }
       if (typeof body.payment_confirmed === 'boolean') {
         order.payment_confirmed = body.payment_confirmed;
-        order.payment_status = body.payment_confirmed ? 'paid' : 'awaiting';
-        order.paid_at = body.payment_confirmed ? (order.paid_at || new Date().toISOString()) : null;
+        order.payment_status = body.payment_confirmed ? 'paid'
+          : (order.payment_method === 'cod' ? 'cod_pending' : 'awaiting');
+        order.paid_at = body.payment_confirmed ? (order.paid_at || now) : null;
       }
-      if (['shipping', 'delivered'].includes(body.status) && !order.driver) return sendJson(res, 400, { error: 'driver_required' });
       if (typeof body.note === 'string') order.admin_note = body.note.slice(0, 500);
-      order.updated_at = new Date().toISOString();
-      if (body.status === 'delivered') order.delivered_at = order.updated_at;
-      else if (body.status) order.delivered_at = null;
+      order.updated_at = now;
       saveDb();
-      return sendJson(res, 200, { order });
+      return sendJson(res, 200, { order: privateOrder(order) });
     }
 
     /* 6c. Encaissement — le gérant confirme ou refuse un paiement */
@@ -1086,7 +1220,10 @@ async function handleRequest(req, res) {
         return sendJson(res, 400, { error: 'invalid_action' });
       }
       const alreadyPaid = order.payment_status === 'paid' || order.status === 'paid';
-      if (alreadyPaid) return sendJson(res, 409, { error: 'already_paid', order });
+      if (alreadyPaid) return sendJson(res, 409, { error: 'already_paid', order: privateOrder(order) });
+      if (body.action === 'refuse' && order.payment_status === 'cod_collected') {
+        return sendJson(res, 409, { error: 'already_collected', order: privateOrder(order) });
+      }
       const now = new Date().toISOString();
       if (body.action === 'confirm') {
         order.payment_status = 'paid';
@@ -1107,7 +1244,69 @@ async function handleRequest(req, res) {
       }
       order.updated_at = now;
       saveDb();
-      return sendJson(res, 200, { order });
+      return sendJson(res, 200, { order: privateOrder(order) });
+    }
+
+    /* 6c-bis. Livreurs — création, codes d'accès, activation (gérant uniquement). */
+    if (method === 'GET' && pathname === '/api/admin/drivers') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      return sendJson(res, 200, { drivers: (db.drivers || []).map(adminDriverRow) });
+    }
+    if (method === 'POST' && pathname === '/api/admin/drivers') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const name = String(body.name || '').trim().slice(0, 80);
+      const phone = String(body.phone || '').trim().slice(0, 30);
+      if (name.length < 2) return sendJson(res, 400, { error: 'invalid_name' });
+      if (phone.replace(/\D/g, '').length < 7) return sendJson(res, 400, { error: 'invalid_phone' });
+      if ((db.drivers || []).length >= 30) return sendJson(res, 400, { error: 'too_many_drivers' });
+      let code = String(body.code || '').trim().slice(0, 40);
+      if (code) {
+        if (normCode(code).length < 6) return sendJson(res, 400, { error: 'code_too_short' });
+        if (driverForCode(code) || safeEqual(normCode(code), normCode(ADMIN_TOKEN))) return sendJson(res, 409, { error: 'code_in_use' });
+      } else code = newDriverCode();
+      const driver = {
+        id: 'drv-' + Date.now().toString(36) + crypto.randomInt(100, 999),
+        name, phone, code, active: true, source: 'admin', created_at: new Date().toISOString()
+      };
+      db.drivers.push(driver);
+      saveDb();
+      return sendJson(res, 201, { driver: adminDriverRow(driver) });
+    }
+    const adminDriverMatch = pathname.match(/^\/api\/admin\/drivers\/([^/]+)$/);
+    if (adminDriverMatch && (method === 'PATCH' || method === 'POST')) {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const driver = (db.drivers || []).find((d) => d.id === decodeURIComponent(adminDriverMatch[1]));
+      if (!driver) return sendJson(res, 404, { error: 'not_found' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      if (body.name !== undefined) {
+        const name = String(body.name || '').trim().slice(0, 80);
+        if (name.length < 2) return sendJson(res, 400, { error: 'invalid_name' });
+        driver.name = name;
+      }
+      if (body.phone !== undefined) {
+        const phone = String(body.phone || '').trim().slice(0, 30);
+        if (phone && phone.replace(/\D/g, '').length < 7) return sendJson(res, 400, { error: 'invalid_phone' });
+        driver.phone = phone;
+      }
+      if (body.active !== undefined) driver.active = Boolean(body.active);
+      if (body.reset_code) driver.code = newDriverCode();
+      else if (body.code !== undefined) {
+        const code = String(body.code || '').trim().slice(0, 40);
+        if (normCode(code).length < 6) return sendJson(res, 400, { error: 'code_too_short' });
+        const other = driverForCode(code);
+        if ((other && other.id !== driver.id) || safeEqual(normCode(code), normCode(ADMIN_TOKEN))) return sendJson(res, 409, { error: 'code_in_use' });
+        driver.code = code;
+      }
+      driver.updated_at = new Date().toISOString();
+      /* Nom et téléphone affichés au client : les missions en cours suivent la fiche. */
+      db.orders.forEach((o) => {
+        if (o.driver && o.driver.id === driver.id && !['delivered', 'cancelled'].includes(o.status)) {
+          o.driver = { id: driver.id, name: driver.name, phone: driver.phone || o.driver.phone || '' };
+        }
+      });
+      saveDb();
+      return sendJson(res, 200, { driver: adminDriverRow(driver) });
     }
 
     if (method === 'GET' && pathname === '/api/admin/products') {
@@ -1239,7 +1438,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, {
         version: 1,
         exported_at: new Date().toISOString(),
-        counts: { products: db.products.length, orders: db.orders.length, users: (db.users || []).length },
+        counts: { products: db.products.length, orders: db.orders.length, users: (db.users || []).length, drivers: (db.drivers || []).length, messages: (db.messages || []).length },
         db
       });
     }
@@ -1254,6 +1453,8 @@ async function handleRequest(req, res) {
       db.products = incoming.products;
       db.orders = incoming.orders;
       db.messages = Array.isArray(incoming.messages) ? incoming.messages : [];
+      db.drivers = Array.isArray(incoming.drivers) ? incoming.drivers : [];
+      ensureEnvDriver();
       db.users = Array.isArray(incoming.users) ? incoming.users : [];
       db.sequences = incoming.sequences && typeof incoming.sequences === 'object' ? incoming.sequences : {};
       db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};
@@ -1261,7 +1462,7 @@ async function handleRequest(req, res) {
       saveDb();
       return sendJson(res, 200, {
         ok: true,
-        counts: { products: db.products.length, orders: db.orders.length, users: db.users.length }
+        counts: { products: db.products.length, orders: db.orders.length, users: db.users.length, drivers: db.drivers.length, messages: db.messages.length }
       });
     }
 
@@ -1511,3 +1712,13 @@ server.listen(PORT, () => {
   console.log(`${SHOP_NAME} — API démarrée sur http://localhost:${PORT}`);
   console.log(`Paiements : Wave=${WAVE_ENABLED ? 'activé' : 'non configuré'} | Orange Money=${ORANGE_ENABLED ? 'activé' : 'non configuré'} | Paiement à la livraison=activé`);
 });
+
+/* Plan gratuit Render : sans trafic pendant 15 min l'instance s'endort, et son disque est éphémère
+   (la base repart de zéro au réveil). Un appel périodique à sa propre URL publique la garde éveillée. */
+const SELF_URL = (process.env.KEEP_ALIVE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
+if (SELF_URL && process.env.KEEP_ALIVE !== '0') {
+  setInterval(() => {
+    https.get(SELF_URL + '/api/health', (r) => r.resume()).on('error', (e) => console.error('[keep-alive]', e.message));
+  }, 9 * 60e3).unref();
+  console.log('Keep-alive actif → ' + SELF_URL + '/api/health toutes les 9 min');
+}
