@@ -10,7 +10,7 @@ Serveur **Node.js sans aucune dépendance** (module `node:http` uniquement) : pa
 Prérequis : **Node.js 18 ou supérieur** (Node.js 26 recommandé).
 
 ```bash
-cd /root/drc-api
+cd ~/drc-api
 node server.js
 ```
 
@@ -52,8 +52,8 @@ Description=API Darou Rahman Chicken
 After=network.target
 
 [Service]
-WorkingDirectory=/root/drc-api
-ExecStart=/usr/bin/node /root/drc-api/server.js
+WorkingDirectory=/opt/drc-api
+ExecStart=/usr/bin/node /opt/drc-api/server.js
 Environment=PORT=8080
 Environment=ADMIN_TOKEN=votre-jeton-secret
 Environment=SHOP_PHONE=+221 77 000 00 00
@@ -217,7 +217,7 @@ dans les champs `reference` ou `metadata.reference` du corps JSON et marque la c
 ### VPS (recommandé — le plus simple)
 
 1. Louez un VPS (DigitalOcean, OVH, Scaleway…) avec Ubuntu/Debian.
-2. Installez Node.js 26, copiez le dossier `/root/drc-api` sur le serveur.
+2. Installez Node.js 26, copiez le dossier `drc-api` sur le serveur.
 3. Configurez l'unité systemd ci-dessus avec vos variables d'environnement.
 4. (Optionnel mais recommandé) Installez **Caddy** ou **nginx** en reverse-proxy avec HTTPS :
    ```

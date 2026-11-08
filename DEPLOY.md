@@ -16,7 +16,7 @@ L'API n'a **aucune dépendance npm** : un fichier `server.js`, Node 20+, et un d
 ## Redéployer après une modification
 
 ```bash
-cd /root/drc-api
+cd ~/drc-api
 git add -A && git commit -m "…"
 git push origin master
 ./deploy.sh                     # sauvegarde → déploiement → restauration
@@ -30,9 +30,9 @@ Render : le `push` seul ne déclenche rien, `deploy.sh` appelle l'API de déploi
 Le script réveille le service, exporte la base (`GET /api/admin/backup`), déclenche le
 déploiement, attend que le build soit `live` sur le bon commit, puis restaure
 (`POST /api/admin/restore`). **Si la sauvegarde échoue, le déploiement est annulé.**
-Les exports sont conservés dans `/root/backups/`.
+Les exports sont conservés dans `~/backups/drc/`.
 
-À lancer depuis `/root/drc-api`, avec `~/.secrets/render_key` et `~/.secrets/admin_token`.
+À lancer depuis `~/drc-api`, avec `~/.secrets/render_key` et `~/.secrets/admin_token`.
 
 ---
 
@@ -43,7 +43,7 @@ Railway accepte un envoi direct du dossier local (pas besoin de dépôt Git).
 ```bash
 npm install -g @railway/cli
 railway login                 # ouvre le navigateur, crée le compte gratuit
-cd /root/drc-api
+cd ~/drc-api
 railway init                  # crée le projet
 railway variables --set ADMIN_TOKEN=<code_gérant> --set SHOP_PHONE="+221 77 000 00 00"
 railway up                    # envoie le dossier et déploie

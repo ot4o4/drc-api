@@ -30,7 +30,7 @@ try:
     st, r = call('POST', '/api/orders', {
         'customer': {'name': 'TEST Hermes (à ignorer)', 'phone': '+221 70 000 00 00', 'zone': 'Parcelles Assainies',
                      'address': 'Test de recette — Unité 20', 'lat': 14.7576, 'lng': -17.4452},
-        'items': [{'id': 1, 'qty': 1}], 'payment_method': 'cod', 'client_order_id': 'hermes-recette-%d' % time.time()})
+        'items': [{'id': 1, 'qty': 1}, {'id': 9, 'qty': 1}], 'payment_method': 'cod', 'client_order_id': 'hermes-recette-%d' % time.time()})
     o = r['order']; oid, tok = o['id'], o['customer_token']
     check('commande créée', st == 201, f"{oid} · {o['total']} F")
     st, r = call('PATCH', f'/api/admin/orders/{oid}', {'driver_id': 'driver-1', 'status': 'preparing'}, A)
