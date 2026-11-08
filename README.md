@@ -159,7 +159,7 @@ et le statut `awaiting_payment_manual`. La commande reste donc toujours valide.
 | Méthode | Route | Description |
 |---|---|---|
 | GET | `/api/health` | Santé du service + moyens de paiement disponibles |
-| GET | `/api/products` | Catalogue (8 produits) |
+| GET | `/api/products` | Catalogue (9 produits dont les cuisses, id 9) |
 | POST | `/api/orders` | Créer une commande |
 | GET | `/api/orders/:id` | Détail d'une commande (`DRC-YYYY-NNNN`) |
 | GET | `/api/orders?phone=...` | Commandes d'un client par téléphone |

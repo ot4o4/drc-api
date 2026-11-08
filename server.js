@@ -189,6 +189,22 @@ const SEED_PRODUCTS = [
     tags: [['yellow', 'Top vente'], ['green', 'Fermier']],
     variants: ['Plateau de 30', 'Plateau de 15'],
     desc: "<p>Des œufs fermiers frais, pondus par nos poulettes élevées en plein air.</p><ul><li>Élevage local et responsable</li><li>Collecte et conditionnement du jour</li><li>Chaîne du froid et emballage protecteur</li><li>Plateau de 30 œufs, ou demi-plateau de 15</li></ul>"
+  },
+  {
+    /* Vendu sur le site (photo p9) : absent de la graine, il était refusé à la commande. */
+    id: 9,
+    name: 'Cuisses de Poulet',
+    cat: 'cuisses',
+    img: 'p9.jpg',
+    price: 2750,
+    old: 0,
+    unit: 'le kg',
+    rating: 4.8,
+    sold: 0,
+    stock: 50,
+    tags: [['green', 'Frais du jour'], ['yellow', 'Petit prix']],
+    variants: ['Cuisses entières', 'Cuisses en morceaux'],
+    desc: "<p>Cuisses de poulet Saf Sap, charnues et savoureuses : le meilleur rapport qualité-prix pour les mijotés, le yassa ou le thiéboudienne.</p><ul><li>Vendues au kilo</li><li>Entières ou en morceaux</li></ul>"
   }
 ];
 
@@ -232,7 +248,17 @@ db.users.forEach((u) => {
   if (typeof u.token_version !== 'number') u.token_version = 0;
 });
 ensureEnvDriver();
+ensureSeedProducts();
 saveDb();
+
+/* Un produit ajouté à la graine apparaît aussi dans une base existante ou restaurée
+   (sans toucher aux prix ni aux stocks déjà réglés par le gérant). */
+function ensureSeedProducts() {
+  SEED_PRODUCTS.forEach((sp) => {
+    if (!db.products.some((p) => Number(p.id) === sp.id)) db.products.push(JSON.parse(JSON.stringify(sp)));
+  });
+  db.products.sort((a, b) => Number(a.id) - Number(b.id));
+}
 
 /* Le livreur principal (variables DRIVER_*) existe toujours : après une base vierge ou une
    restauration, il est recréé avec le code défini sur l'hébergeur. */
@@ -1455,6 +1481,7 @@ async function handleRequest(req, res) {
       db.messages = Array.isArray(incoming.messages) ? incoming.messages : [];
       db.drivers = Array.isArray(incoming.drivers) ? incoming.drivers : [];
       ensureEnvDriver();
+      ensureSeedProducts();
       db.users = Array.isArray(incoming.users) ? incoming.users : [];
       db.sequences = incoming.sequences && typeof incoming.sequences === 'object' ? incoming.sequences : {};
       db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};

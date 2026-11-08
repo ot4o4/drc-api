@@ -167,6 +167,17 @@ test('code promo du site (promo_code) appliqué, puis refusé sans bloquer la co
   assert.equal(second.promo_rejected, 'already_used');
 });
 
+test('les cuisses de poulet (id 9) se commandent et survivent à une restauration', async () => {
+  const o = await create(payload({ items: [{ id: 9, qty: 1 }] }));
+  assert.equal(o.subtotal, 2750);
+  const backup = await (await fetch(BASE + '/api/admin/backup', { headers: ADMIN })).json();
+  const old = { ...backup.db, products: backup.db.products.filter((p) => p.id !== 9) };
+  await fetch(BASE + '/api/admin/restore', { method: 'POST', headers: json(ADMIN), body: JSON.stringify({ db: old }) });
+  const list = (await (await fetch(BASE + '/api/products')).json()).products;
+  assert.ok(list.some((p) => p.id === 9 && p.price === 2750));
+  await fetch(BASE + '/api/admin/restore', { method: 'POST', headers: json(ADMIN), body: JSON.stringify(backup) });
+});
+
 test('restauration : livreurs conservés et livreur principal garanti', async () => {
   const backup = await (await fetch(BASE + '/api/admin/backup', { headers: ADMIN })).json();
   assert.ok(backup.counts.drivers >= 2);

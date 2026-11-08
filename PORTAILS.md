@@ -44,7 +44,7 @@ le disque monté sur `data/`).
 ## Tests
 
 ```bash
-node --test test/                       # API : 16 tests (rôles, livreurs, verrouillage, promo, restauration…)
+node --test test/                       # API : 17 tests (rôles, livreurs, verrouillage, promo, cuisses id 9, restauration…)
 node tools/e2e-portails.mjs <web> <api> <code-gérant> <code-livreur> <dossier-captures> [port-cdp]
 ```
 
