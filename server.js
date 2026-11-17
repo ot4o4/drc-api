@@ -1721,6 +1721,7 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};
       if (typeof incoming.auth_secret === 'string' && incoming.auth_secret) db.auth_secret = incoming.auth_secret;
       if (incoming.settings && typeof incoming.settings === 'object') db.settings = incoming.settings;
+      else if (db.settings) db.settings.migrated_v8 = false;   /* ancienne sauvegarde : réappliquer la migration aux produits restaurés */
       ensureSettings();
       saveDb();
       return sendJson(res, 200, {
