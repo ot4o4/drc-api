@@ -252,7 +252,46 @@ db.users.forEach((u) => {
 });
 ensureEnvDriver();
 ensureSeedProducts();
+ensureSettings();
 saveDb();
+
+/* Réglages de la boutique, pilotés depuis l'application gérant. */
+function defaultSettings() {
+  return {
+    shop_open: true,
+    closed_message: 'La boutique est fermée pour le moment. Revenez demain dès 8 h.',
+    banner_title: 'Livraison offerte dès 15 000 F',
+    banner_text: 'Commande avant 18 h, livrée en 2 h partout à Dakar.',
+    delivery_fee: DELIVERY_FEE,
+    free_from: FREE_DELIVERY_FROM,
+    payment_numbers: PAYMENT_NUMBERS.slice(),
+    slots: ['Express 2 h', 'Ce soir 18h–20h', 'Demain 9h–12h'],
+    pay_methods: { wave: true, orange_money: true, cod: true },
+    updated_at: null
+  };
+}
+function ensureSettings() {
+  const d = defaultSettings();
+  if (!db.settings || typeof db.settings !== 'object') db.settings = {};
+  Object.keys(d).forEach((k) => { if (db.settings[k] === undefined) db.settings[k] = d[k]; });
+  if (!db.settings.migrated_v8) {
+    /* État de la vitrine drc.sn repris côté serveur : ailes et foie « bientôt », braisé et escalopes masqués. */
+    db.products.forEach((p) => {
+      if ([4, 5].includes(Number(p.id)) && p.soon === undefined) p.soon = true;
+      if ([6, 7].includes(Number(p.id))) p.available = false;
+    });
+    db.settings.migrated_v8 = true;
+  }
+}
+function S() { return db.settings || defaultSettings(); }
+function publicSettings() {
+  const s = S();
+  return {
+    shop_open: s.shop_open !== false, closed_message: s.closed_message, banner_title: s.banner_title, banner_text: s.banner_text,
+    delivery_fee: Number(s.delivery_fee) || 0, free_from: Number(s.free_from) || 0,
+    payment_numbers: s.payment_numbers, slots: s.slots, pay_methods: s.pay_methods, updated_at: s.updated_at
+  };
+}
 
 /* Un produit ajouté à la graine apparaît aussi dans une base existante ou restaurée
    (sans toucher aux prix ni aux stocks déjà réglés par le gérant). */
@@ -611,9 +650,24 @@ function nextOrderId() {
   return `DRC-${year}-${String(seq).padStart(4, '0')}`;
 }
 
+function payNumbers() {
+  const n = db && db.settings && Array.isArray(db.settings.payment_numbers) ? db.settings.payment_numbers.filter(Boolean) : [];
+  return n.length ? n : PAYMENT_NUMBERS;
+}
+/* Stock : retiré à la commande, rendu à l'annulation (une seule fois dans chaque sens). */
+function applyStock(order, sign) {
+  if (sign < 0 && order.stock_applied) return;
+  if (sign > 0 && !order.stock_applied) return;
+  (order.items || []).forEach((it) => {
+    const p = db.products.find((x) => Number(x.id) === Number(it.id));
+    if (p && Number.isFinite(Number(p.stock))) p.stock = Math.max(0, Number(p.stock) + sign * (Number(it.qty) || 0));
+  });
+  order.stock_applied = sign < 0;
+}
+
 function paymentInstructionsText(method) {
   const label = method === 'wave' ? 'Wave' : 'Orange Money';
-  return `Envoyez le montant total à l'un de ces numéros ${label} : ${PAYMENT_NUMBERS.join(' · ')} — indiquez la référence DRC-XXXX dans le motif, puis nous confirmons votre commande.`;
+  return `Envoyez le montant total à l'un de ces numéros ${label} : ${payNumbers().join(' · ')} — indiquez la référence DRC-XXXX dans le motif, puis nous confirmons votre commande.`;
 }
 
 /* Appel HTTP sortant (Wave / Orange Money), sans dépendance. */
@@ -742,7 +796,7 @@ function buildFallbackPayment(method, orderId = '', total = 0) {
     return {
       type: 'link',
       mode: 'merchant_link',
-      numbers: PAYMENT_NUMBERS,
+      numbers: payNumbers(),
       amount: total,
       url: staticPayUrl(link, orderId, total),
       number: null,
@@ -753,10 +807,10 @@ function buildFallbackPayment(method, orderId = '', total = 0) {
   return {
     type: 'instructions',
     url: null,
-    number: PAYMENT_NUMBERS[0] || SHOP_PHONE,
-    numbers: PAYMENT_NUMBERS,
+    number: payNumbers()[0] || SHOP_PHONE,
+    numbers: payNumbers(),
     reference: '',
-    instructions: `${label} : envoyez le montant total à l'un de ces numéros (${PAYMENT_NUMBERS.join(' · ')}) en indiquant la référence de votre commande dans le motif, puis nous confirmerons votre commande.`
+    instructions: `${label} : envoyez le montant total à l'un de ces numéros (${payNumbers().join(' · ')}) en indiquant la référence de votre commande dans le motif, puis nous confirmerons votre commande.`
   };
 }
 
@@ -930,6 +984,11 @@ async function handleRequest(req, res) {
       return;
     }
 
+    /* 1b. Réglages publics (boutique ouverte, bandeau, frais de livraison, numéros de paiement). */
+    if (method === 'GET' && pathname === '/api/settings') {
+      return sendJson(res, 200, { settings: publicSettings() });
+    }
+
     /* 2. Catalogue */
     if (method === 'GET' && pathname === '/api/products') {
       sendJson(res, 200, { products: db.products.filter((p) => p.available !== false) });
@@ -967,6 +1026,8 @@ async function handleRequest(req, res) {
         return sendJson(res, 400, { error: 'invalid' });
       }
 
+      if (S().shop_open === false) return sendJson(res, 409, { error: 'shop_closed', message: S().closed_message });
+      if (S().pay_methods && S().pay_methods[paymentMethod] === false) return sendJson(res, 409, { error: 'payment_method_disabled' });
       const clientOrderId = String(body.client_order_id || '').trim().slice(0, 100);
       if (clientOrderId) {
         const existing = db.orders.find(o => o.client_order_id === clientOrderId);
@@ -980,7 +1041,7 @@ async function handleRequest(req, res) {
       for (const it of items) {
         const idNum = Number(it && it.id) || 0;
         const product = db.products.find((p) => Number(p.id) === idNum);
-        if (!product || product.available === false) {
+        if (!product || product.available === false || product.soon === true) {
           return sendJson(res, 400, { error: 'invalid_item', id: idNum });
         }
         resolvedItems.push({
@@ -993,7 +1054,8 @@ async function handleRequest(req, res) {
       }
       const cleanItems = resolvedItems;
       const subtotal = cleanItems.reduce((sum, it) => sum + it.price * it.qty, 0);
-      const deliveryFee = subtotal < FREE_DELIVERY_FROM ? DELIVERY_FEE : 0;
+      const st = S();
+      const deliveryFee = subtotal < (Number(st.free_from) || 0) ? (Number(st.delivery_fee) || 0) : 0;
 
       let discount = 0;
       let promo = null;
@@ -1088,6 +1150,7 @@ async function handleRequest(req, res) {
       }
 
       delete order._wave_session;
+      applyStock(order, -1);
       db.orders.push(order);
       // Fidélité : 1 point par 100 F payés, crédité au compte du même numéro.
       const buyer = db.users.find((u) => normalizePhone(u.phone) === normalizePhone(customer.phone));
@@ -1323,6 +1386,8 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
         if (changed) order.assigned_at = nextDriver ? now : null;
       }
       if (body.status) {
+        if (body.status === 'cancelled' && order.status !== 'cancelled') applyStock(order, +1);
+        if (order.status === 'cancelled' && body.status !== 'cancelled') applyStock(order, -1);
         order.status = body.status;
         if (body.status === 'paid') {
           order.payment_status = 'paid';
@@ -1371,6 +1436,7 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
         order.payment_confirmed = true;
       } else {
         const reason = String(body.reason || '').trim().slice(0, 300) || 'Paiement non reçu';
+        applyStock(order, +1);
         order.payment_status = 'refused';
         order.refused_at = now;
         order.payment_refusal_reason = reason;
@@ -1445,12 +1511,68 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       return sendJson(res, 200, { driver: adminDriverRow(driver) });
     }
 
+    if (pathname === '/api/admin/settings' && method === 'GET') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      return sendJson(res, 200, { settings: publicSettings() });
+    }
+    if (pathname === '/api/admin/settings' && (method === 'PATCH' || method === 'POST')) {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const b = parseJsonBody(await readBody(req)) || {};
+      const st = S();
+      if (b.shop_open !== undefined) st.shop_open = Boolean(b.shop_open);
+      ['closed_message', 'banner_title', 'banner_text'].forEach((k) => {
+        if (typeof b[k] === 'string') st[k] = b[k].trim().slice(0, k === 'banner_title' ? 60 : 200);
+      });
+      if (b.delivery_fee !== undefined) {
+        const v = Number(b.delivery_fee); if (!Number.isFinite(v) || v < 0 || v > 50000) return sendJson(res, 400, { error: 'invalid_fee' });
+        st.delivery_fee = Math.round(v);
+      }
+      if (b.free_from !== undefined) {
+        const v = Number(b.free_from); if (!Number.isFinite(v) || v < 0 || v > 1000000) return sendJson(res, 400, { error: 'invalid_free_from' });
+        st.free_from = Math.round(v);
+      }
+      if (Array.isArray(b.payment_numbers)) {
+        const nums = b.payment_numbers.map((x) => String(x || '').replace(/[^\d ]/g, '').trim()).filter((x) => x.replace(/\D/g, '').length >= 9).slice(0, 5);
+        if (!nums.length) return sendJson(res, 400, { error: 'invalid_numbers' });
+        st.payment_numbers = nums;
+      }
+      if (Array.isArray(b.slots)) {
+        const sl = b.slots.map((x) => String(x || '').trim().slice(0, 40)).filter(Boolean).slice(0, 6);
+        if (sl.length) st.slots = sl;
+      }
+      if (b.pay_methods && typeof b.pay_methods === 'object') {
+        const pm = Object.assign({}, st.pay_methods);
+        ['wave', 'orange_money', 'cod'].forEach((k) => { if (b.pay_methods[k] !== undefined) pm[k] = Boolean(b.pay_methods[k]); });
+        if (!pm.wave && !pm.orange_money && !pm.cod) return sendJson(res, 400, { error: 'no_payment_method' });
+        st.pay_methods = pm;
+      }
+      st.updated_at = new Date().toISOString();
+      db.settings = st;
+      saveDb();
+      return sendJson(res, 200, { settings: publicSettings() });
+    }
+    /* Pouls léger pour les notifications de l'application gérant (tâche de fond). */
+    if (pathname === '/api/admin/pulse' && method === 'GET') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const sorted = db.orders.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      const claims = db.orders.filter((o) => o.payment_claim && o.payment_status !== 'paid' && o.status !== 'cancelled')
+        .map((o) => ({ id: o.id, at: o.payment_claim.at, total: o.total }));
+      const today = new Date().toISOString().slice(0, 10);
+      return sendJson(res, 200, {
+        latest: sorted.slice(0, 8).map((o) => ({ id: o.id, at: o.created_at, total: o.total, name: (o.customer && o.customer.name) || '', method: o.payment_method, status: o.status })),
+        claims,
+        today_orders: db.orders.filter((o) => String(o.created_at || '').slice(0, 10) === today).length,
+        to_review: db.orders.filter((o) => o.payment_method !== 'cod' && o.payment_status !== 'paid' && !['cancelled'].includes(o.status)).length,
+        shop_open: S().shop_open !== false
+      });
+    }
+
     if (method === 'GET' && pathname === '/api/admin/products') {
       if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
       return sendJson(res, 200, {
         products: db.products.map((p) => ({
-          id: p.id, name: p.name, cat: p.cat, price: p.price, old: p.old,
-          stock: p.stock, unit: p.unit, available: p.available !== false
+          id: p.id, name: p.name, cat: p.cat, img: p.img, price: p.price, old: p.old,
+          stock: p.stock, unit: p.unit, available: p.available !== false, soon: p.soon === true, sold: p.sold
         }))
       });
     }
@@ -1473,12 +1595,14 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
         product.stock = Math.round(stock);
       }
       if (body.available !== undefined) product.available = Boolean(body.available);
+      if (body.soon !== undefined) product.soon = Boolean(body.soon);
+      if (typeof body.unit === 'string' && body.unit.trim()) product.unit = body.unit.trim().slice(0, 40);
       if (typeof body.name === 'string' && body.name.trim()) product.name = body.name.trim().slice(0, 80);
       product.updated_at = new Date().toISOString();
       saveDb();
       return sendJson(res, 200, {
         product: { id: product.id, name: product.name, price: product.price,
-          stock: product.stock, available: product.available !== false }
+          stock: product.stock, unit: product.unit, available: product.available !== false, soon: product.soon === true }
       });
     }
 
@@ -1596,6 +1720,8 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       db.sequences = incoming.sequences && typeof incoming.sequences === 'object' ? incoming.sequences : {};
       db.oauth = incoming.oauth && typeof incoming.oauth === 'object' ? incoming.oauth : {};
       if (typeof incoming.auth_secret === 'string' && incoming.auth_secret) db.auth_secret = incoming.auth_secret;
+      if (incoming.settings && typeof incoming.settings === 'object') db.settings = incoming.settings;
+      ensureSettings();
       saveDb();
       return sendJson(res, 200, {
         ok: true,
