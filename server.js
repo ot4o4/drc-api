@@ -501,6 +501,10 @@ function newDriverCode() {
 function privateOrder(o) {
   if (!o) return null;
   const { customer_token, client_order_id, ...rest } = o;
+  /* Position du livreur : seulement si elle est récente (6 min), sinon elle induit en erreur. */
+  const dp = o.driver_pos;
+  rest.driver_pos = (dp && Number.isFinite(Number(dp.lat)) && Date.now() - new Date(dp.at || 0).getTime() < 6 * 60e3)
+    ? { lat: Number(dp.lat), lng: Number(dp.lng), at: dp.at, acc: dp.acc || null } : null;
   return rest;
 }
 
@@ -1183,6 +1187,23 @@ async function handleRequest(req, res) {
       const key = phoneKey(user.phone);
       const orders = db.orders.filter((o) => phoneKey(o.customer && o.customer.phone) === key).map(privateOrder);
       return sendJson(res, 200, { orders });
+    }
+
+    /* 3c. Position du livreur pendant la livraison (portail livreur / app gérant). */
+    const posMatch = pathname.match(/^\/api\/orders\/([^/]+)\/driver-position$/);
+    if (posMatch && method === 'POST') {
+      const order = db.orders.find((o) => o.id === decodeURIComponent(posMatch[1]));
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      const access = orderAccess(req, order);
+      if (access !== 'driver' && access !== 'admin') return sendJson(res, 403, { error: 'forbidden' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const lat = Number(body.lat), lng = Number(body.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < 12 || lat > 17 || lng < -18 || lng > -11) {
+        return sendJson(res, 400, { error: 'invalid_position' });
+      }
+      order.driver_pos = { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)), acc: Math.max(0, Number(body.acc) || 0), at: new Date().toISOString() };
+      saveDb();
+      return sendJson(res, 200, { ok: true });
     }
 
     /* 4a. Page de retour après paiement (Wave / Orange Money) → renvoie dans l'application. */
