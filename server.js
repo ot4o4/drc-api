@@ -58,6 +58,9 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT_ID || '';
 const ORDER_WEBHOOK = process.env.ORDER_WEBHOOK_URL || '';
 const SHOP_NAME = 'Darou Rahman Chicken';
+/* URL publique de l'API (retours de paiement, webhooks). */
+const PUBLIC_API = (process.env.PUBLIC_API_URL || process.env.RENDER_EXTERNAL_URL || 'https://drc-api-dj8t.onrender.com').replace(/\/+$/, '');
+const APP_SCHEME = 'drcchicken';
 
 /* Codes promo — le code TERANGA est annoncé dans l'application. */
 const PROMOS = {
@@ -180,7 +183,7 @@ const SEED_PRODUCTS = [
     name: 'Œufs Fermiers — Plateau de 30',
     cat: 'oeufs',
     img: 'p8.jpg',
-    price: 5500,
+    price: 3000,
     old: 0,
     unit: 'le plateau',
     rating: 4.9,
@@ -517,6 +520,50 @@ function orderSummary(o) {
   ].filter(Boolean).join('\n');
 }
 
+/* Paiement confirmé (webhook, vérification Wave active ou gérant). */
+function markOrderPaid(order, by, txn) {
+  order.payment_status = 'paid';
+  order.payment_confirmed = true;
+  order.paid_at = new Date().toISOString();
+  if (txn) order.payment_txn = String(txn).slice(0, 80);
+  order.payment_review = { action: 'confirm', at: order.paid_at, by: by || 'auto', reason: '' };
+  if (['pending', 'awaiting_payment', 'awaiting_payment_manual'].includes(order.status)) order.status = 'confirmed';
+  saveDb();
+  notifyText('✅ Paiement reçu ' + order.id + ' — ' + order.total + ' F (' + (by || 'auto') + ')');
+}
+
+async function notifyText(text) {
+  try {
+    if (ORDER_WEBHOOK) {
+      await fetch(ORDER_WEBHOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ summary: text }) });
+    }
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT) {
+      await fetch('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT, text, disable_web_page_preview: true })
+      });
+    }
+  } catch (e) { console.error('[notif] échec :', e.message); }
+}
+
+/* Vérification active d'une session Wave Checkout (sans attendre le webhook), au plus toutes les 8 s. */
+const WAVE_CHECKS = new Map();
+async function refreshWavePayment(order) {
+  if (!WAVE_ENABLED || !order || order.payment_status === 'paid') return;
+  const sid = order.payment && order.payment.session_id;
+  if (!sid) return;
+  const last = WAVE_CHECKS.get(order.id) || 0;
+  if (Date.now() - last < 8000) return;
+  WAVE_CHECKS.set(order.id, Date.now());
+  try {
+    const r = await httpsRequest({ url: 'https://api.wave.com/v1/checkout/sessions/' + encodeURIComponent(sid), method: 'GET', headers: { Authorization: 'Bearer ' + WAVE_API_TOKEN }, timeoutMs: 6000 });
+    const d = r.json || {};
+    if (d.payment_status === 'succeeded' && (!d.client_reference || d.client_reference === order.id)) {
+      if (!(Number(d.amount) + 0.5 < Number(order.total))) markOrderPaid(order, 'wave', d.transaction_id || sid);
+    }
+  } catch (e) { console.error('[wave] vérification', order.id, e.message); }
+}
+
 async function notifyManager(o) {
   try {
     if (ORDER_WEBHOOK) {
@@ -620,12 +667,15 @@ async function createWaveCheckout(order) {
       amount: String(order.total),
       currency: 'XOF',
       client_reference: order.id,
-      success_url: `https://darourahman.sn/merci?ref=${encodeURIComponent(order.id)}`,
-      error_url: `https://darourahman.sn/erreur?ref=${encodeURIComponent(order.id)}`,
+      success_url: `${PUBLIC_API}/pay/return?ref=${encodeURIComponent(order.id)}&r=ok`,
+      error_url: `${PUBLIC_API}/pay/return?ref=${encodeURIComponent(order.id)}&r=ko`,
       ...(WAVE_MERCHANT_NAME ? { business_name: WAVE_MERCHANT_NAME } : {})
     }
   });
-  if (res.json && (res.json.wave_launch_url || res.json.url)) return res.json.wave_launch_url || res.json.url;
+  if (res.json && (res.json.wave_launch_url || res.json.url)) {
+    order._wave_session = res.json.id || null;
+    return res.json.wave_launch_url || res.json.url;
+  }
   throw new Error(`wave_error_${res.status}`);
 }
 
@@ -660,8 +710,8 @@ async function createOrangePayment(order) {
       currency: '952', // XOF
       order_id: order.id,
       amount: order.total,
-      return_url: `https://darourahman.sn/merci?ref=${encodeURIComponent(order.id)}`,
-      notif_url: `https://api.darourahman.sn/api/payments/webhook/orange_money`,
+      return_url: `${PUBLIC_API}/pay/return?ref=${encodeURIComponent(order.id)}&r=ok`,
+      notif_url: `${PUBLIC_API}/api/payments/webhook/orange_money`,
       lang: 'fr',
       reference: SHOP_NAME
     }
@@ -672,7 +722,18 @@ async function createOrangePayment(order) {
   throw new Error(`orange_error_${res.status}`);
 }
 
-function buildFallbackPayment(method, orderId = '') {
+/* Lien marchand statique : {ref}/{amount} remplacés ; sinon le montant est ajouté en ?amount=
+   (les liens marchands Wave « pay.wave.com/m/… » ouvrent l'appli Wave avec le montant prérempli). */
+function staticPayUrl(link, orderId, total) {
+  let url = link.replace('{ref}', encodeURIComponent(orderId));
+  if (url.includes('{amount}')) return url.replace('{amount}', total ? String(total) : '');
+  if (total && /pay\.wave\.com\//.test(url) && !/[?&]amount=/.test(url)) {
+    url += (url.includes('?') ? '&' : '?') + 'amount=' + encodeURIComponent(String(total));
+  }
+  return url;
+}
+
+function buildFallbackPayment(method, orderId = '', total = 0) {
   const label = method === 'wave' ? 'Wave' : 'Orange Money';
   const link = method === 'wave' ? WAVE_PAY_LINK : ORANGE_PAY_LINK;
   // Lien de paiement statique (Wave Business / Orange Money) : utilisable sans contrat API.
@@ -680,7 +741,10 @@ function buildFallbackPayment(method, orderId = '') {
   if (link) {
     return {
       type: 'link',
-      url: link.replace('{ref}', encodeURIComponent(orderId)).replace('{amount}', ''),
+      mode: 'merchant_link',
+      numbers: PAYMENT_NUMBERS,
+      amount: total,
+      url: staticPayUrl(link, orderId, total),
       number: null,
       reference: orderId,
       instructions: `Paiement ${label} sécurisé. Indiquez la référence ${orderId} dans le motif.`
@@ -1003,13 +1067,16 @@ async function handleRequest(req, res) {
           order.status = 'awaiting_payment';
           order.payment = {
             type: 'link',
+            mode: 'checkout',
+            session_id: order._wave_session || null,
+            amount: total,
             url,
             number: null,
             reference: orderId,
             instructions: `Cliquez sur le lien ${label} pour payer votre commande en toute sécurité.`
           };
         } else {
-          const fallback = buildFallbackPayment(paymentMethod, orderId);
+          const fallback = buildFallbackPayment(paymentMethod, orderId, total);
           order.status = fallback.type === 'link' ? 'awaiting_payment' : 'awaiting_payment_manual';
           order.payment = fallback;
           if (fallback.type === 'link') {
@@ -1020,6 +1087,7 @@ async function handleRequest(req, res) {
         }
       }
 
+      delete order._wave_session;
       db.orders.push(order);
       // Fidélité : 1 point par 100 F payés, crédité au compte du même numéro.
       const buyer = db.users.find((u) => normalizePhone(u.phone) === normalizePhone(customer.phone));
@@ -1054,6 +1122,47 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { orders });
     }
 
+    /* 4a. Page de retour après paiement (Wave / Orange Money) → renvoie dans l'application. */
+    if (method === 'GET' && pathname === '/pay/return') {
+      const ref = String(url.searchParams.get('ref') || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40);
+      const okPay = url.searchParams.get('r') !== 'ko';
+      const deep = APP_SCHEME + '://order/' + ref;
+      const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Darou Rahmane Chicken</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#F4EFE8;font-family:system-ui,sans-serif;color:#232020;text-align:center}
+.c{padding:32px 24px;max-width:360px}.i{width:72px;height:72px;border-radius:50%;margin:0 auto 18px;display:grid;place-items:center;font-size:34px;background:${okPay ? '#FF8A4C' : '#E9E3DA'};color:#fff}
+h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:block;margin-top:22px;padding:16px;border-radius:999px;background:#232020;color:#fff;text-decoration:none;font-weight:600}</style></head>
+<body><div class="c"><div class="i">${okPay ? '✓' : '!'}</div><h1>${okPay ? 'Paiement envoyé' : 'Paiement non abouti'}</h1>
+<p>${okPay ? 'Commande ' + ref + ' : retournez dans l’application, la confirmation s’affiche automatiquement.' : 'Le paiement de la commande ' + ref + ' n’a pas abouti. Retournez dans l’application pour réessayer.'}</p>
+<a href="${deep}">Retour à l’application</a></div><script>setTimeout(function(){location.href=${JSON.stringify(deep)}},600)</script></body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(html);
+      return;
+    }
+
+    /* 4b. Le client déclare avoir payé (transfert Wave / Orange Money vers un numéro) → le gérant vérifie. */
+    const claimMatch = pathname.match(/^\/api\/orders\/([^/]+)\/payment-claim$/);
+    if (method === 'POST' && claimMatch) {
+      const rlClaim = rateLimit(req, 'pay_claim', 12, 10 * 60e3);
+      if (!rlClaim.ok) return sendJson(res, 429, { error: 'rate_limited', retry_after: rlClaim.retry });
+      const order = db.orders.find((o) => o.id === decodeURIComponent(claimMatch[1]));
+      if (!order) return sendJson(res, 404, { error: 'not_found' });
+      if (orderAccess(req, order) !== 'customer') return sendJson(res, 403, { error: 'forbidden' });
+      if (order.payment_status === 'paid') return sendJson(res, 409, { error: 'already_paid', order: privateOrder(order) });
+      if (order.status === 'cancelled') return sendJson(res, 409, { error: 'cancelled' });
+      const body = parseJsonBody(await readBody(req)) || {};
+      const payPhone = String(body.pay_phone || '').replace(/[^\d+ ]/g, '').trim().slice(0, 20);
+      const txn = String(body.txn || '').trim().slice(0, 60);
+      const to = String(body.to || '').replace(/[^\d ]/g, '').trim().slice(0, 20);
+      if (!payPhone && !txn) return sendJson(res, 400, { error: 'invalid' });
+      order.payment_claim = { at: new Date().toISOString(), pay_phone: payPhone, txn, to, method: order.payment_method };
+      order.payment_status = order.payment_status === 'refused' ? 'awaiting' : (order.payment_status || 'awaiting');
+      if (order.customer && payPhone && !order.customer.pay_phone) order.customer.pay_phone = payPhone;
+      saveDb();
+      notifyText('💸 Paiement déclaré ' + order.id + ' — ' + order.total + ' F via ' + (order.payment_method === 'wave' ? 'Wave' : 'Orange Money') +
+        (payPhone ? ' depuis ' + payPhone : '') + (to ? ' vers ' + to : '') + (txn ? ' · réf ' + txn : '') + ' → à vérifier dans l’espace gérant.');
+      return sendJson(res, 200, { order: privateOrder(order) });
+    }
+
     /* 4. Détail d'une commande */
     const orderMatch = pathname.match(/^\/api\/orders\/([^/]+)$/);
     if (method === 'GET' && orderMatch) {
@@ -1065,6 +1174,7 @@ async function handleRequest(req, res) {
       const id = decodeURIComponent(orderMatch[1]);
       const order = db.orders.find((o) => o.id === id);
       if (!order) return sendJson(res, 404, { error: 'not_found' });
+      await refreshWavePayment(order);
       const user = userFromRequest(req);
       const owner = Boolean(user && phoneKey(user.phone) === phoneKey(order.customer && order.customer.phone));
       return sendJson(res, 200, { order: (owner || orderAccess(req, order)) ? privateOrder(order) : publicOrder(order) });
@@ -1506,10 +1616,21 @@ async function handleRequest(req, res) {
         return sendJson(res, 503, { error: 'webhook_not_configured' });
       }
       if (provider === 'wave') {
+        /* Deux stratégies Wave : « Signing secret » (en-tête Wave-Signature, HMAC de timestamp + corps brut)
+           ou « Shared secret » (Authorization: Bearer <secret>). */
         const sig = String(req.headers['wave-signature'] || '');
-        const m = sig.match(/t=(\d+),v1=([a-f0-9]+)/i);
-        const expected = m ? crypto.createHmac('sha256', waveSecret).update(m[1] + '.' + bodyText).digest('hex') : '';
-        const ok = Boolean(m) && Math.abs(Date.now() / 1000 - Number(m[1])) < 300 && safeEqual(expected, m[2]);
+        const auth = String(req.headers['authorization'] || '');
+        let ok = false;
+        if (sig) {
+          const t = (sig.match(/t=(\d+)/) || [])[1];
+          const v1s = [...sig.matchAll(/v1=([a-f0-9]+)/gi)].map((m) => m[1]);
+          if (t && v1s.length && Math.abs(Date.now() / 1000 - Number(t)) < 300) {
+            const expected = crypto.createHmac('sha256', waveSecret).update(t + bodyText).digest('hex');
+            ok = v1s.some((v) => safeEqual(expected, v));
+          }
+        } else if (/^Bearer\s+/i.test(auth)) {
+          ok = safeEqual(auth.replace(/^Bearer\s+/i, '').trim(), waveSecret);
+        }
         if (!ok) return sendJson(res, 401, { error: 'bad_signature' });
       } else {
         const given = String(req.headers['x-orange-secret'] || '');
@@ -1517,17 +1638,36 @@ async function handleRequest(req, res) {
       }
       const body = parseJsonBody(bodyText);
       let reference = null;
+      let amount = null;
+      let succeeded = true;
+      let txn = '';
       if (body && typeof body === 'object') {
-        if (typeof body.reference === 'string') reference = body.reference;
-        else if (body.metadata && typeof body.metadata.reference === 'string') reference = body.metadata.reference;
+        const d = body.data && typeof body.data === 'object' ? body.data : null;
+        if (provider === 'wave' && d) {
+          /* checkout.session.completed : data.client_reference = n° de commande DRC */
+          if (body.type && body.type !== 'checkout.session.completed') succeeded = false;
+          if (d.payment_status && d.payment_status !== 'succeeded') succeeded = false;
+          reference = typeof d.client_reference === 'string' ? d.client_reference : null;
+          amount = Number(d.amount);
+          txn = String(d.transaction_id || d.id || '');
+        } else {
+          if (typeof body.reference === 'string') reference = body.reference;
+          else if (typeof body.order_id === 'string') reference = body.order_id;
+          else if (body.metadata && typeof body.metadata.reference === 'string') reference = body.metadata.reference;
+          if (body.status && !/^(SUCCESS|SUCCESSFULL|SUCCEEDED|PAID)$/i.test(String(body.status))) succeeded = false;
+          if (body.amount != null) amount = Number(body.amount);
+          txn = String(body.txnid || body.transaction_id || '');
+        }
       }
-      if (reference) {
+      if (reference && succeeded) {
         const order = db.orders.find((o) => o.id === reference || (o.payment && o.payment.reference === reference));
-        if (order) {
-          order.status = 'paid';
-          order.payment_status = 'paid';
-          order.paid_at = new Date().toISOString();
-          saveDb();
+        if (order && order.payment_status !== 'paid') {
+          if (amount != null && Number.isFinite(amount) && amount + 0.5 < Number(order.total)) {
+            order.payment_review = { action: 'underpaid', at: new Date().toISOString(), by: provider, reason: 'Montant reçu ' + amount + ' F < ' + order.total + ' F' };
+            saveDb();
+          } else {
+            markOrderPaid(order, provider, txn);
+          }
         }
       }
       return sendJson(res, 200, { ok: true });
