@@ -1207,6 +1207,28 @@ async function handleRequest(req, res) {
     }
 
     /* 4a. Page de retour après paiement (Wave / Orange Money) → renvoie dans l'application. */
+    // Profil iOS « Web Clip » : drc.sn/app/drc.mobileconfig servi avec le bon type MIME
+    // (GitHub Pages l'envoie en application/octet-stream, Safari ne propose alors pas l'installation).
+    if ((method === 'GET' || method === 'HEAD') && (pathname === '/ios/drc.mobileconfig' || pathname === '/ios')) {
+      try {
+        const now = Date.now();
+        if (!global.__drcClip || now - global.__drcClip.at > 3600e3) {
+          const r = await fetch('https://drc.sn/app/drc.mobileconfig', { cache: 'no-store' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          global.__drcClip = { at: now, buf: Buffer.from(await r.arrayBuffer()) };
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/x-apple-aspen-config',
+          'Content-Disposition': 'attachment; filename="DarouRahmaneChicken.mobileconfig"',
+          'Cache-Control': 'public, max-age=600',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(global.__drcClip.buf);
+      } catch (e) {
+        res.writeHead(302, { Location: 'https://drc.sn/app/iphone.html' });
+        return res.end();
+      }
+    }
     if (method === 'GET' && pathname === '/pay/return') {
       const ref = String(url.searchParams.get('ref') || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40);
       const okPay = url.searchParams.get('r') !== 'ko';
