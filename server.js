@@ -116,7 +116,7 @@ const SEED_PRODUCTS = [
     stock: 64,
     tags: [['green', 'Frais du jour']],
     variants: ['Mélange cuisses/pilons', 'Cuisses seules', 'Pilons seuls'],
-    desc: "<p>Le morceau préféré des familles sénégalaises, tendre et savoureux.</p><ul><li>Élevage local sélectionné avec nos partenaires fermiers</li><li>Découpe du jour pour une fraîcheur garantie</li><li>Chaîne du froid maintenue de l'abattoir à votre cuisine</li><li>Parfait pour le yassa, le thiéboudienne ou le braisé</li></ul>"
+    desc: "<p>Le morceau préféré des familles sénégalaises, tendre et savoureux.</p><ul><li>Élevage local sélectionné avec nos partenaires éleveurs</li><li>Découpe du jour pour une fraîcheur garantie</li><li>Chaîne du froid maintenue de l'abattoir à votre cuisine</li><li>Parfait pour le yassa, le thiéboudienne ou le braisé</li></ul>"
   },
   {
     id: 4,
@@ -161,7 +161,7 @@ const SEED_PRODUCTS = [
     stock: 22,
     tags: [['red', 'Recette du chef'], ['green', 'Prêt à cuire']],
     variants: ['Marinade Yassa', 'Marinade Kebab', 'Marinade Piment doux'],
-    desc: "<p>Notre spécialité : un poulet fermier mariné par nos chefs, prêt à griller pour vos braisés de quartier.</p><ul><li>Élevage local, poulet fermier de qualité</li><li>Marinade maison préparée le jour même</li><li>Chaîne du froid respectée, livré frais</li><li>Environ 2 kg, de quoi régaler 5 à 6 convives</li></ul>"
+    desc: "<p>Notre spécialité : un poulet frais mariné par nos chefs, prêt à griller pour vos braisés de quartier.</p><ul><li>Élevage local, poulet frais de qualité</li><li>Marinade maison préparée le jour même</li><li>Chaîne du froid respectée, livré frais</li><li>Environ 2 kg, de quoi régaler 5 à 6 convives</li></ul>"
   },
   {
     id: 7,
@@ -180,7 +180,7 @@ const SEED_PRODUCTS = [
   },
   {
     id: 8,
-    name: 'Œufs Fermiers — Plateau de 30',
+    name: 'Œufs Frais — Plateau de 30',
     cat: 'oeufs',
     img: 'p8.jpg',
     price: 3000,
@@ -189,9 +189,9 @@ const SEED_PRODUCTS = [
     rating: 4.9,
     sold: 3210,
     stock: 80,
-    tags: [['yellow', 'Top vente'], ['green', 'Fermier']],
+    tags: [['yellow', 'Top vente'], ['green', 'Frais']],
     variants: ['Plateau de 30', 'Plateau de 15'],
-    desc: "<p>Des œufs fermiers frais, pondus par nos poulettes élevées en plein air.</p><ul><li>Élevage local et responsable</li><li>Collecte et conditionnement du jour</li><li>Chaîne du froid et emballage protecteur</li><li>Plateau de 30 œufs, ou demi-plateau de 15</li></ul>"
+    desc: "<p>Des œufs frais, pondus par nos poulettes élevées en plein air.</p><ul><li>Élevage local et responsable</li><li>Collecte et conditionnement du jour</li><li>Chaîne du froid et emballage protecteur</li><li>Plateau de 30 œufs, ou demi-plateau de 15</li></ul>"
   },
   {
     /* Vendu sur le site (photo p9) : absent de la graine, il était refusé à la commande. */

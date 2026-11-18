@@ -6,26 +6,26 @@
 
 ## Description courte (max. 80 caractères)
 
-Poulet fermier frais livré à Dakar. Payez Wave, Orange Money ou espèces.
+Poulet frais livré à Dakar. Payez Wave, Orange Money ou espèces.
 
 ## Description complète (max. 4 000 caractères)
 
 🐔 **Darou Rahman Chicken — Le poulet frais de Dakar, livré chez vous !**
 
-Votre boutique de viande de poulet en ligne à Dakar. Des produits fermiers frais, découpés le jour même, livrés rapidement dans toute la ville, avec un paiement simple et sécurisé. Fini les files d'attente et les produits douteux : commandez depuis votre canapé, recevez le meilleur du poulet sénégalais directement chez vous.
+Votre boutique de viande de poulet en ligne à Dakar. Des produits frais, découpés le jour même, livrés rapidement dans toute la ville, avec un paiement simple et sécurisé. Fini les files d'attente et les produits douteux : commandez depuis votre canapé, recevez le meilleur du poulet sénégalais directement chez vous.
 
 **🥬 Une fraîcheur incomparable**
-Nos poulets fermiers sont élevés en plein air par des éleveurs locaux de la région de Thiès et de Dakar. Découpe du jour, chaîne du froid respectée de la ferme à votre porte. Chaque commande est préparée à la demande : vous recevez des produits frais, jamais congelés, prêts à cuisiner.
+Nos poulets sont élevés en plein air par des éleveurs locaux de la région de Thiès et de Dakar. Découpe du jour, chaîne du froid respectée de la ferme à votre porte. Chaque commande est préparée à la demande : vous recevez des produits frais, jamais congelés, prêts à cuisiner.
 
 **🍗 Un catalogue pour toute la famille**
-• Poulet Bicyclette fermier entier, notre star !
+• Poulet Bicyclette entier, frais du jour, notre star !
 • Blanc de poulet (filet), riche en protéines
 • Cuisses & pilons frais, parfaits pour le yassa et le thiéb
 • Ailes de poulet, idéales pour le braisé
 • Foie & gésiers, riches en fer
 • Poulet braisé mariné prêt à griller (marinades Yassa, Kebab, Piment doux)
 • Escalopes de poulet nature ou panées maison
-• Œufs fermiers — plateaux de 30 ou 15
+• Œufs frais — plateaux de 30 ou 15
 
 Chaque produit propose plusieurs variantes de découpe selon vos besoins.
 

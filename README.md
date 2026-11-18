@@ -185,7 +185,7 @@ Corps :
 
 ```json
 {
-  "items": [{"id": 1, "name": "Poulet Bicyclette Fermier Entier", "price": 7500, "qty": 2, "variant": "Entier prêt à cuire"}],
+  "items": [{"id": 1, "name": "Poulet Entier", "price": 7500, "qty": 2, "variant": "Entier prêt à cuire"}],
   "customer": {"name": "Awa Diop", "phone": "+221 77 123 45 67", "zone": "Plateau", "note": "Livrer après 18h"},
   "payment_method": "wave"
 }
