@@ -1356,7 +1356,7 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
 
     /* 5b. Connexion de l'équipe : code → jeton de session (lent et limité contre les essais en série) */
     if (method === 'POST' && pathname === '/api/staff/session') {
-      const rlS = rateLimit(req, 'staff_login', 6, 10 * 60e3);
+      const rlS = rateLimit(req, 'staff_login', 10, 10 * 60e3);
       if (!rlS.ok || adminBlocked(req)) {
         const retry = rlS.ok ? Math.ceil(ADMIN_BLOCK_MS / 1000) : rlS.retry;
         res.setHeader('Retry-After', String(retry));
