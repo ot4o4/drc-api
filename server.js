@@ -420,6 +420,7 @@ function adminFailed(req) {
   const ip = clientIp(req);
   const rec = ADMIN_FAILS.get(ip) || { count: 0, blockedUntil: 0 };
   rec.count += 1;
+  secFail();
   if (rec.count >= ADMIN_FAIL_LIMIT) { rec.blockedUntil = Date.now() + ADMIN_BLOCK_MS; rec.count = 0; }
   ADMIN_FAILS.set(ip, rec);
 }
@@ -437,10 +438,44 @@ function driverForCode(code) {
   }
   return found;
 }
+/* Sessions d'équipe (gérant / livreur) : le code s'échange une fois contre un jeton signé,
+   expirant, révocable. L'appareil ne garde jamais le code lui-même. */
+const SEC_LOG = [];            /* tentatives refusées (horodatages), pour l'alerte gérant */
+function secFail() { SEC_LOG.push(Date.now()); while (SEC_LOG.length && Date.now() - SEC_LOG[0] > 864e5) SEC_LOG.shift(); }
+function codeTag(code) { return crypto.createHash('sha256').update('drc:' + normCode(code)).digest('base64url').slice(0, 12); }
+function staffVersion() { return Number((db.settings || {}).staff_session_version) || 0; }
+function makeStaffToken(role, driver) {
+  const days = role === 'admin' ? 14 : 30;
+  const p = { r: role, sv: staffVersion(), exp: Date.now() + days * 864e5 };
+  if (role === 'admin') p.ct = codeTag(ADMIN_TOKEN);
+  else { p.d = driver.id; p.ct = codeTag(driver.code); }
+  const payload = Buffer.from(JSON.stringify(p)).toString('base64url');
+  const sig = crypto.createHmac('sha256', authSecret()).update('staff.' + payload).digest('base64url');
+  return { token: 'stf.' + payload + '.' + sig, exp: p.exp };
+}
+function staffFromToken(given) {
+  if (!given || !given.startsWith('stf.')) return null;
+  const parts = given.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const expect = crypto.createHmac('sha256', authSecret()).update('staff.' + parts[1]).digest('base64url');
+    if (!safeEqual(parts[2], expect)) return null;
+    const p = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (!p.exp || p.exp < Date.now() || (Number(p.sv) || 0) !== staffVersion()) return null;
+    if (p.r === 'admin') return safeEqual(p.ct, codeTag(ADMIN_TOKEN)) ? { role: 'admin' } : null;
+    if (p.r === 'driver') {
+      const d = (db.drivers || []).find((x) => x && x.id === p.d && x.active !== false && x.code);
+      return d && safeEqual(p.ct, codeTag(d.code)) ? { role: 'driver', driver: d } : null;
+    }
+  } catch (e) { /* jeton illisible */ }
+  return null;
+}
+
 function isAdmin(req) {
   if (!ADMIN_TOKEN || ADMIN_TOKEN === 'changeme') return false;
   if (adminBlocked(req)) return false;
   const given = String(req.headers['x-admin-token'] || '');
+  if (given.startsWith('stf.')) { const st = staffFromToken(given); if (!st) adminFailed(req); return Boolean(st && st.role === 'admin'); }
   const ok = safeEqual(given, ADMIN_TOKEN);
   /* Un code livreur valide n'est pas une tentative ratée : sans ce garde-fou, les
      rafraîchissements du portail livreur bloquaient l'espace gérant (même réseau). */
@@ -453,6 +488,7 @@ function currentDriver(req) {
   const given = String(req.headers['x-admin-token'] || '');
   if (!given) return null;
   if (adminBlocked(req)) return null;
+  if (given.startsWith('stf.')) { const st = staffFromToken(given); if (!st) adminFailed(req); return st && st.role === 'driver' ? st.driver : null; }
   const d = driverForCode(given);
   if (!d && !safeEqual(given, ADMIN_TOKEN)) adminFailed(req);
   return d;
@@ -1318,6 +1354,29 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       return sendJson(res, 201, message);
     }
 
+    /* 5b. Connexion de l'équipe : code → jeton de session (lent et limité contre les essais en série) */
+    if (method === 'POST' && pathname === '/api/staff/session') {
+      const rlS = rateLimit(req, 'staff_login', 6, 10 * 60e3);
+      if (!rlS.ok || adminBlocked(req)) {
+        const retry = rlS.ok ? Math.ceil(ADMIN_BLOCK_MS / 1000) : rlS.retry;
+        res.setHeader('Retry-After', String(retry));
+        return sendJson(res, 429, { error: 'rate_limited', retry_after: retry });
+      }
+      let body = {};
+      try { body = JSON.parse(await readBody(req) || '{}') || {}; } catch (e) { body = {}; }
+      const code = String((body && body.code) || '').slice(0, 64);
+      const want = String((body && body.role) || '');
+      let out = null;
+      if (want !== 'driver' && ADMIN_TOKEN && ADMIN_TOKEN !== 'changeme' && safeEqual(code.trim(), ADMIN_TOKEN)) out = { role: 'admin', ...makeStaffToken('admin') };
+      else if (want !== 'admin') { const d = driverForCode(code); if (d) out = { role: 'driver', name: d.name || '', ...makeStaffToken('driver', d) }; }
+      if (!out) {
+        adminFailed(req);
+        await new Promise((r) => setTimeout(r, 900 + Math.floor(Math.random() * 600)));
+        return sendJson(res, 401, { error: 'unauthorized' });
+      }
+      return sendJson(res, 200, out);
+    }
+
     /* 6. Administration */
     if (method === 'GET' && pathname === '/api/admin/orders') {
       const rlAdmin = rateLimit(req, 'admin', 120, 10 * 60e3);
@@ -1595,8 +1654,17 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       return sendJson(res, 200, { settings: publicSettings() });
     }
     /* Pouls léger pour les notifications de l'application gérant (tâche de fond). */
+    if (pathname === '/api/admin/sessions/revoke' && method === 'POST') {
+      if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      db.settings = db.settings || {};
+      db.settings.staff_session_version = staffVersion() + 1;
+      saveDb();
+      return sendJson(res, 200, { ok: true, token: makeStaffToken('admin').token });
+    }
+
     if (pathname === '/api/admin/pulse' && method === 'GET') {
       if (!isAdminReq) return sendJson(res, 401, { error: 'unauthorized' });
+      const dayAgo = Date.now() - 864e5;
       const sorted = db.orders.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
       const claims = db.orders.filter((o) => o.payment_claim && o.payment_status !== 'paid' && o.status !== 'cancelled')
         .map((o) => ({ id: o.id, at: o.payment_claim.at, total: o.total }));
@@ -1606,7 +1674,8 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
         claims,
         today_orders: db.orders.filter((o) => String(o.created_at || '').slice(0, 10) === today).length,
         to_review: db.orders.filter((o) => o.payment_method !== 'cod' && o.payment_status !== 'paid' && !['cancelled'].includes(o.status)).length,
-        shop_open: S().shop_open !== false
+        shop_open: S().shop_open !== false,
+        security: { failed_24h: SEC_LOG.filter((t) => t > dayAgo).length, blocked_ips: [...ADMIN_FAILS.values()].filter((r) => r.blockedUntil > Date.now()).length }
       });
     }
 
