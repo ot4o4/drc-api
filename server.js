@@ -1437,6 +1437,11 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       if (want !== 'driver' && ADMIN_TOKEN && ADMIN_TOKEN !== 'changeme' && safeEqual(code, ADMIN_TOKEN)) who = { role: 'admin' };
       else if (want !== 'admin') { const d = driverForCode(code); if (d) who = { role: 'driver', driver: d }; }
       const action = pathname.slice('/api/staff/totp/'.length);
+      /* Une session déjà ouverte (jeton d'équipe) suffit : l'app n'a plus le code en mémoire. */
+      if (!who) {
+        if (isAdmin(req)) who = { role: 'admin' };
+        else { const d = currentDriver(req); if (d) who = { role: 'driver', driver: d }; }
+      }
       if (!who && action !== 'reset') { adminFailed(req); await new Promise((r) => setTimeout(r, 800)); return sendJson(res, 401, { error: 'unauthorized' }); }
       const drvId = who && who.driver && who.driver.id;
       const label = who ? totpLabel(who.role, who.driver) : '';
