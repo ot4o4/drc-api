@@ -1333,6 +1333,33 @@ async function handleRequest(req, res) {
         return res.end();
       }
     }
+    /* Profils iOS « Web Clip » des apps d'équipe : /ios/gerant.mobileconfig, /ios/livreur.mobileconfig.
+       GitHub Pages sert ces fichiers en application/octet-stream, Safari ne propose alors rien ;
+       ici ils sortent avec le type MIME attendu par iOS. */
+    const iosClip = pathname.match(/^\/ios\/(gerant|livreur)\.mobileconfig$/);
+    if ((method === 'GET' || method === 'HEAD') && iosClip) {
+      const slug = iosClip[1];
+      const cacheKey = '__clip_' + slug;
+      try {
+        const now = Date.now();
+        if (!global[cacheKey] || now - global[cacheKey].at > 3600e3) {
+          const r = await fetch(`https://drc.sn/${slug}/drc.mobileconfig`, { cache: 'no-store' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          global[cacheKey] = { at: now, buf: Buffer.from(await r.arrayBuffer()) };
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/x-apple-aspen-config',
+          'Content-Disposition': `attachment; filename="DRC-${slug}.mobileconfig"`,
+          'Cache-Control': 'public, max-age=600',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(method === 'HEAD' ? undefined : global[cacheKey].buf);
+      } catch (e) {
+        res.writeHead(302, { Location: `https://drc.sn/${slug}/ios/` });
+        return res.end();
+      }
+    }
+
     if (method === 'GET' && pathname === '/pay/return') {
       const ref = String(url.searchParams.get('ref') || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40);
       const okPay = url.searchParams.get('r') !== 'ko';
