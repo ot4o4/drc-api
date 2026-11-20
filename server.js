@@ -1339,11 +1339,17 @@ async function handleRequest(req, res) {
     const iosClip = pathname.match(/^\/ios\/(gerant|livreur)\.mobileconfig$/);
     if ((method === 'GET' || method === 'HEAD') && iosClip) {
       const slug = iosClip[1];
+      /* Ces profils ne sont servis qu'à qui connaît la clé : l'URL seule ne suffit pas. */
+      const staffKey = String(process.env.STAFF_KEY || '');
+      const given = String(url.searchParams.get('k') || '');
+      if (!staffKey || !given || !safeEqual(given, staffKey)) return sendJson(res, 403, { error: 'forbidden' });
+      const secretPath = String(process.env['STAFF_PATH_' + slug.toUpperCase()] || '');
+      if (!secretPath) return sendJson(res, 503, { error: 'not_configured' });
       const cacheKey = '__clip_' + slug;
       try {
         const now = Date.now();
         if (!global[cacheKey] || now - global[cacheKey].at > 3600e3) {
-          const r = await fetch(`https://drc.sn/${slug}/drc.mobileconfig`, { cache: 'no-store' });
+          const r = await fetch(`https://drc.sn/${secretPath}/drc.mobileconfig`, { cache: 'no-store' });
           if (!r.ok) throw new Error('HTTP ' + r.status);
           global[cacheKey] = { at: now, buf: Buffer.from(await r.arrayBuffer()) };
         }
