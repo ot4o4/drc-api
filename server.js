@@ -442,6 +442,74 @@ function driverForCode(code) {
    expirant, révocable. L'appareil ne garde jamais le code lui-même. */
 const SEC_LOG = [];            /* tentatives refusées (horodatages), pour l'alerte gérant */
 function secFail() { SEC_LOG.push(Date.now()); while (SEC_LOG.length && Date.now() - SEC_LOG[0] > 864e5) SEC_LOG.shift(); }
+/* --------------------------- TOTP (Google Authenticator) --------------------------- */
+
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function b32encode(buf) {
+  let bits = 0, value = 0, out = '';
+  for (const b of buf) {
+    value = (value << 8) | b; bits += 8;
+    while (bits >= 5) { out += B32[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function b32decode(str) {
+  let bits = 0, value = 0;
+  const out = [];
+  for (const ch of String(str).toUpperCase().replace(/[^A-Z2-7]/g, '')) {
+    const idx = B32.indexOf(ch);
+    if (idx < 0) continue;
+    value = (value << 5) | idx; bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+
+/* Code à 6 chiffres pour un pas de 30 s (step par défaut : maintenant). */
+function totpCode(secret, step) {
+  const counter = Buffer.alloc(8);
+  const s = Number.isFinite(step) ? step : Math.floor(Date.now() / 30000);
+  counter.writeUInt32BE(0, 0);
+  counter.writeUInt32BE(s >>> 0, 4);
+  const h = crypto.createHmac('sha1', b32decode(secret)).update(counter).digest();
+  const o = h[h.length - 1] & 0x0f;
+  const n = ((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3];
+  return String(n % 1000000).padStart(6, '0');
+}
+
+/* Tolère une horloge décalée de ±30 s. */
+function totpVerify(secret, code) {
+  const c = String(code || '').replace(/\D/g, '');
+  if (c.length !== 6 || !secret) return false;
+  const now = Math.floor(Date.now() / 30000);
+  for (const d of [-1, 0, 1]) if (safeEqual(totpCode(secret, now + d), c)) return true;
+  return false;
+}
+
+function totpStore() {
+  if (!db.staff_totp || typeof db.staff_totp !== 'object') db.staff_totp = {};
+  return db.staff_totp;
+}
+function totpKey(role, driverId) { return role === 'driver' ? 'driver:' + String(driverId) : 'admin'; }
+function totpEntry(role, driverId) { return totpStore()[totpKey(role, driverId)] || null; }
+function totpActive(role, driverId) {
+  const e = totpEntry(role, driverId);
+  return !!(e && e.secret && e.confirmed_at && e.enabled !== false);
+}
+function totpUri(secret, label) {
+  const issuer = 'Darou Rahmane Chicken';
+  const q = `secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  return `otpauth://totp/${encodeURIComponent(issuer + ':' + label)}?${q}`;
+}
+function totpLabel(role, driver) {
+  return role === 'driver' ? 'Livreur ' + (driver && driver.name ? driver.name : '') : 'Gérant';
+}
+
+/* Le drapeau "enabled" et le secret vivent en base : la sauvegarde/restauration les transporte. */
+
 function codeTag(code) { return crypto.createHash('sha256').update('drc:' + normCode(code)).digest('base64url').slice(0, 12); }
 function staffVersion() { return Number((db.settings || {}).staff_session_version) || 0; }
 function makeStaffToken(role, driver) {
@@ -1355,6 +1423,76 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
     }
 
     /* 5b. Connexion de l'équipe : code → jeton de session (lent et limité contre les essais en série) */
+    /* 5c. Authentificateur (TOTP) de l'équipe ------------------------------ */
+    /* Toutes ces routes exigent le code d'accès : on ne peut pas manipuler l'authentificateur
+       d'un compte sans prouver qu'on possède son code. */
+    if (method === 'POST' && pathname.startsWith('/api/staff/totp/')) {
+      const rlT = rateLimit(req, 'staff_totp', 12, 10 * 60e3);
+      if (!rlT.ok) { res.setHeader('Retry-After', String(rlT.retry)); return sendJson(res, 429, { error: 'rate_limited', retry_after: rlT.retry }); }
+      let body = {};
+      try { body = JSON.parse(await readBody(req) || '{}') || {}; } catch (e) { body = {}; }
+      const code = String(body.code || '').trim().slice(0, 64);
+      const want = String(body.role || '');
+      let who = null;
+      if (want !== 'driver' && ADMIN_TOKEN && ADMIN_TOKEN !== 'changeme' && safeEqual(code, ADMIN_TOKEN)) who = { role: 'admin' };
+      else if (want !== 'admin') { const d = driverForCode(code); if (d) who = { role: 'driver', driver: d }; }
+      const action = pathname.slice('/api/staff/totp/'.length);
+      if (!who && action !== 'reset') { adminFailed(req); await new Promise((r) => setTimeout(r, 800)); return sendJson(res, 401, { error: 'unauthorized' }); }
+      const drvId = who && who.driver && who.driver.id;
+      const label = who ? totpLabel(who.role, who.driver) : '';
+
+      if (action === 'state') {
+        return sendJson(res, 200, { active: totpActive(who.role, drvId), label, pending: !!(totpEntry(who.role, drvId) || {}).secret && !totpActive(who.role, drvId) });
+      }
+
+      if (action === 'setup') {
+        const store = totpStore();
+        const secret = b32encode(crypto.randomBytes(20));
+        store[totpKey(who.role, drvId)] = { secret, created_at: new Date().toISOString(), confirmed_at: null, enabled: true, label };
+        saveDb();
+        return sendJson(res, 200, { secret, uri: totpUri(secret, label), label });
+      }
+
+      if (action === 'confirm') {
+        const e = totpEntry(who.role, drvId);
+        if (!e || !e.secret) return sendJson(res, 400, { error: 'no_setup' });
+        const otp = String(body.otp || '').replace(/\D/g, '');
+        if (!totpVerify(e.secret, otp)) { adminFailed(req); await new Promise((r) => setTimeout(r, 700)); return sendJson(res, 401, { error: 'otp_invalid' }); }
+        e.confirmed_at = new Date().toISOString(); e.enabled = true;
+        db.settings.staff_session_version = staffVersion() + 1;   /* les anciens jetons tombent */
+        saveDb();
+        return sendJson(res, 200, { ok: true, active: true, label });
+      }
+
+      if (action === 'disable') {
+        const e = totpEntry(who.role, drvId);
+        if (!e) return sendJson(res, 200, { ok: true, active: false });
+        const otp = String(body.otp || '').replace(/\D/g, '');
+        if (!totpVerify(e.secret, otp)) { adminFailed(req); await new Promise((r) => setTimeout(r, 700)); return sendJson(res, 401, { error: 'otp_invalid' }); }
+        delete totpStore()[totpKey(who.role, drvId)];
+        db.settings.staff_session_version = staffVersion() + 1;
+        saveDb();
+        return sendJson(res, 200, { ok: true, active: false });
+      }
+
+      /* Réinitialisation : soit le gérant connecté, soit le code de secours de l'hébergeur
+         (variable TOTP_RECOVERY_CODE) pour le cas « téléphone perdu ». */
+      if (action === 'reset') {
+        const recovery = String(process.env.TOTP_RECOVERY_CODE || '');
+        const byRecovery = recovery && safeEqual(String(req.headers['x-recovery-code'] || ''), recovery);
+        if (!byRecovery && !isAdmin(req)) return sendJson(res, 401, { error: 'unauthorized' });
+        const role = String(body.account || want || 'admin');
+        const target = role === 'driver' ? String(body.driver_id || '') : '';
+        if (role === 'driver' && !target) return sendJson(res, 400, { error: 'driver_required' });
+        delete totpStore()[totpKey(role, target)];
+        db.settings.staff_session_version = staffVersion() + 1;
+        saveDb();
+        return sendJson(res, 200, { ok: true, active: false });
+      }
+
+      return sendJson(res, 404, { error: 'unknown_action' });
+    }
+
     if (method === 'POST' && pathname === '/api/staff/session') {
       const rlS = rateLimit(req, 'staff_login', 10, 10 * 60e3);
       if (!rlS.ok || adminBlocked(req)) {
@@ -1366,14 +1504,29 @@ h1{font-size:24px;margin:0 0 8px}p{color:#7a716a;line-height:1.45}a{display:bloc
       try { body = JSON.parse(await readBody(req) || '{}') || {}; } catch (e) { body = {}; }
       const code = String((body && body.code) || '').slice(0, 64);
       const want = String((body && body.role) || '');
-      let out = null;
-      if (want !== 'driver' && ADMIN_TOKEN && ADMIN_TOKEN !== 'changeme' && safeEqual(code.trim(), ADMIN_TOKEN)) out = { role: 'admin', ...makeStaffToken('admin') };
-      else if (want !== 'admin') { const d = driverForCode(code); if (d) out = { role: 'driver', name: d.name || '', ...makeStaffToken('driver', d) }; }
-      if (!out) {
+      let who = null;
+      if (want !== 'driver' && ADMIN_TOKEN && ADMIN_TOKEN !== 'changeme' && safeEqual(code.trim(), ADMIN_TOKEN)) who = { role: 'admin' };
+      else if (want !== 'admin') { const d = driverForCode(code); if (d) who = { role: 'driver', driver: d }; }
+      if (!who) {
         adminFailed(req);
         await new Promise((r) => setTimeout(r, 900 + Math.floor(Math.random() * 600)));
         return sendJson(res, 401, { error: 'unauthorized' });
       }
+      /* Second facteur : si l'authentificateur est activé pour ce compte, le code à 6 chiffres
+         est obligatoire. Sans lui, aucun jeton n'est délivré. */
+      const otp = String((body && body.otp) || '').replace(/\D/g, '');
+      const drvId = who.driver && who.driver.id;
+      if (totpActive(who.role, drvId)) {
+        if (!otp) return sendJson(res, 401, { error: 'otp_required', otp: true });
+        if (!totpVerify(totpEntry(who.role, drvId).secret, otp)) {
+          adminFailed(req);
+          await new Promise((r) => setTimeout(r, 700));
+          return sendJson(res, 401, { error: 'otp_invalid', otp: true });
+        }
+      }
+      const out = who.role === 'admin'
+        ? { role: 'admin', ...makeStaffToken('admin') }
+        : { role: 'driver', name: who.driver.name || '', ...makeStaffToken('driver', who.driver) };
       return sendJson(res, 200, out);
     }
 
